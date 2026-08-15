@@ -24,19 +24,17 @@ const (
 	deviceBusy int32 = 1 // WebRTC connection is active
 )
 
-// 会话级硬编码参数（调校后的非常用取值）。
 const (
-	eventQueueSize = 36 // Buffer size for per-session event channels
-	maxSessions    = 5  // Maximum concurrent session contexts
-	preemptTimeout = 9 * time.Second // 抢占清理等待上限
+	eventQueueSize = 32  // Buffer size for per-session event channels
+	maxSessions    = 5   // Maximum concurrent session contexts
+	preemptTimeout = 10 * time.Second
 )
 
-// 心跳与重连退避硬编码参数（调校后的非常用取值）。
 const (
-	heartbeatIntervalSec = 27   // WebSocket 心跳间隔（秒）
-	retryFastAttempts    = 11   // 快速重连次数
-	retryFastInterval    = 4 * time.Second // 快速重连间隔
-	retrySlowInterval    = 4 * time.Minute // 之后的慢速重连间隔
+	heartbeatIntervalSec = 30   // WebSocket 心跳间隔（秒）
+	retryFastAttempts    = 12   // 快速重连次数（间隔 5s）
+	retryFastInterval    = 5 * time.Second
+	retrySlowInterval    = 5 * time.Minute // 之后的慢速重连间隔
 )
 
 // SessionCtx holds all state for one browser connection.
@@ -1087,12 +1085,11 @@ func (ctx *SessionCtx) releasePeer() {
 // ---------------------------------------------------------------------------
 
 const (
-	// 码率阶梯迟滞 / 恢复判定窗口（调校后的非常用取值）
-	bitrateHysteresis    = 27 * time.Second
-	bitrateRecoveryStale = 27 * time.Second
+	bitrateHysteresis    = 30 * time.Second
+	bitrateRecoveryStale = 30 * time.Second
 	// If a single drop exceeds this fraction, log a warning — the BWE is
 	// reacting too aggressively and may overshoot into a death spiral.
-	aggressiveDropThreshold = 0.55 // 55 %
+	aggressiveDropThreshold = 0.50 // 50 %
 )
 
 // bitrateStep computes a target bitrate as a fraction of the initial

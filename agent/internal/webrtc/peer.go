@@ -279,11 +279,6 @@ const (
 	pliStateReset   = 2 // L2: full encoder reset (10s throttle, 15s min)
 )
 
-// NACK 重传缓冲包数：≈1s @ 30fps。
-// 注意：pion nack responder 强制要求 2 的幂（允许 1..32768），
-// 因此该值不能调校为非常用数值，保持 1024。
-const nackBufferPackets = 1024
-
 func NewPeerManager(serial string, stunServers []string, turnServer *config.TurnServerConfig, videoCodec string, profileLevelID string, audioCodec string, audioEnabled bool) (*PeerManager, error) {
 	if profileLevelID == "" {
 		profileLevelID = "42e01f"
@@ -400,7 +395,7 @@ func NewPeerManager(serial string, stunServers []string, turnServer *config.Turn
 	//      RED-wrapped as a bogus "new primary", corrupting the RED
 	//      redundant-block bookkeeping for all subsequent packets
 	//      (observed: FEC ON + loss → ~85% phantom loss, zero decode).
-	nackResp, err := nack.NewResponderInterceptor(nack.ResponderSize(nackBufferPackets))
+	nackResp, err := nack.NewResponderInterceptor(nack.ResponderSize(1024))
 	if err != nil {
 		return nil, fmt.Errorf("create nack responder: %w", err)
 	}
@@ -796,7 +791,7 @@ func (pm *PeerManager) rtcpListener() {
 
 	pm.lastPLITime = time.Now()
 
-	const minResetInterval = 14 * time.Second // 编码器重置最小间隔（调校取值）
+	const minResetInterval = 15 * time.Second
 	var lastFIR time.Time
 
 	for {
@@ -1106,12 +1101,11 @@ func (pm *PeerManager) SetFECAutoDisabled(v bool) {
 
 // ---- FEC auto-decision -------------------------------------------------
 
-// FEC 判定硬编码参数（调校后的非常用取值）。
 const (
-	fecLossThreshold     = 2.1   // loss > 2.1% → consider FEC
-	fecRTTMax            = 180.0 // RTT < 180ms → still useful for FEC on weak uplink
-	fecWeakUplinkLossMin = 5.5   // loss > 5.5% + any RTT → weak uplink, force FEC ON
-	fecHysteresisMin     = 9 * time.Second
+	fecLossThreshold       = 2.0     // loss > 2% → consider FEC
+	fecRTTMax              = 200.0   // RTT < 200ms → still useful for FEC on weak uplink
+	fecWeakUplinkLossMin   = 5.0     // loss > 5% + any RTT → weak uplink, force FEC ON
+	fecHysteresisMin       = 10 * time.Second
 )
 
 // evaluateFEC decides whether to enable RED FEC based on:

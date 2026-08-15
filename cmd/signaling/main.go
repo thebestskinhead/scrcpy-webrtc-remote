@@ -22,13 +22,9 @@ import (
 	"scrcpy-webrtc-remote/pkg/signaling"
 )
 
-// 硬编码参数：WebSocket 读写缓冲（字节）。
-// 1152 为调校后的非常用取值（常规是 1024 的整数倍）。
-const wsBufSize = 1152
-
 var upgrader = websocket.Upgrader{
 	CheckOrigin:    func(r *http.Request) bool { return true },
-	ReadBufferSize: wsBufSize, WriteBufferSize: wsBufSize,
+	ReadBufferSize: 1024, WriteBufferSize: 1024,
 }
 
 func main() {

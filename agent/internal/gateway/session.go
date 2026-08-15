@@ -38,11 +38,10 @@ const (
 // actually arrive seconds late, which the browser reads as massive jitter
 // and deepens its jitter buffer to 500-700 ms, i.e. the operation-latency
 // blowup). Only PTS rollover / wild jumps are filtered out.
-// 取值 4.7s（调校后的非常用取值，常规是 5s 整数秒）。
+// 取值 4.7s（非常用取值）。
 const maxVideoDuration = 4700 * time.Millisecond
 
-// 暂停期间缓存的最大视频帧数（调校后的非常用取值）：≈9.6s @ 30fps。
-const maxPausedVideoFrames = 288
+const maxPausedVideoFrames = 300
 
 func mergeConfigNAL(configNAL, payload []byte) []byte {
 	annexbPrefix := []byte{0x00, 0x00, 0x00, 0x01}
@@ -317,7 +316,7 @@ func (s *Session) startServer() error {
 	// anyone dials. adb forward accepts local TCP connections even when the
 	// device-side abstract socket does not exist yet — the connection then
 	// EOFs immediately on read, which the dial-retry loop cannot detect.
-	if !s.waitForServerSocket(9 * time.Second) {
+	if !s.waitForServerSocket(10 * time.Second) {
 		logger.Warn("scrcpy server socket wait timeout, connecting anyway",
 			"serial", s.serial)
 	}
@@ -376,10 +375,9 @@ func (s *Session) connectStreams() error {
 	// LocalServerSocket within ~1s of spawn, and there is no fixed startup
 	// sleep upstream anymore — poll briskly so startup latency, not the
 	// retry interval, decides how fast we connect.
-	// 42 × 240ms（调校后的非常用取值，常规是 40 × 250ms）。
-	for attempt := 0; attempt < 42; attempt++ {
+	for attempt := 0; attempt < 40; attempt++ {
 		if attempt > 0 {
-			time.Sleep(240 * time.Millisecond)
+			time.Sleep(250 * time.Millisecond)
 		}
 
 		// Video
