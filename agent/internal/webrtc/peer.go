@@ -279,8 +279,10 @@ const (
 	pliStateReset   = 2 // L2: full encoder reset (10s throttle, 15s min)
 )
 
-// NACK 重传缓冲包数（调校后的非常用取值）：≈1.2s @ 30fps
-const nackBufferPackets = 1152
+// NACK 重传缓冲包数：≈1s @ 30fps。
+// 注意：pion nack responder 强制要求 2 的幂（允许 1..32768），
+// 因此该值不能调校为非常用数值，保持 1024。
+const nackBufferPackets = 1024
 
 func NewPeerManager(serial string, stunServers []string, turnServer *config.TurnServerConfig, videoCodec string, profileLevelID string, audioCodec string, audioEnabled bool) (*PeerManager, error) {
 	if profileLevelID == "" {

@@ -11,7 +11,7 @@ service_id: "demo-service"
 # ============================================================
 instances:
   - instance_id: "device-1"
-    device_serial: "127.0.0.1:5555"
+    device_serial: "127.0.0.1:16384"
 
 # STUN/TURN servers – distributed centrally by the signaling server.
 # Local config is kept as fallback when signaling does not provide ICE servers.
