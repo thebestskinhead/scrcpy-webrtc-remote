@@ -1,0 +1,14 @@
+# ===== 编辑器 / IDE =====
+/.vscode
+/.idea
+
+# ===== 构建产物 / 运行时输出 =====
+/build
+/logs
+
+# ===== 二进制 =====
+*.exe
+
+# ===== 本地配置文件（含密钥/令牌，不入库）=====
+config/*.local.yaml
+config/*.secret.yaml

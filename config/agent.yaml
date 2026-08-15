@@ -1,0 +1,46 @@
+# Desktop Agent Configuration
+# WebSocket URL of the signaling server
+signaling_url: "ws://127.0.0.1:8080"
+
+# Shared service identity (browser connects with this service_id)
+service_id: "demo-service"
+
+# ============================================================
+# Device instances – the agent manages one scrcpy session per instance.
+# Multiple instances = one agent process serving multiple devices.
+# ============================================================
+instances:
+  - instance_id: "device-1"
+    device_serial: "127.0.0.1:5555"
+
+# STUN/TURN servers – distributed centrally by the signaling server.
+# Local config is kept as fallback when signaling does not provide ICE servers.
+# stun_servers:
+#   - "stun:stun.l.google.com:19302"
+# turn_server:
+#   urls:
+#     - "turn:turn.example.com:3478"
+#   username: "user"
+#   credential: "pass"
+
+# scrcpy / video configuration (shared by all instances)
+scrcpy:
+  server_version: "4.0"
+  jar_path: "./scrcpy-server.jar"
+  port_pool_start: 30000
+  port_pool_size: 100
+  max_size: 1920
+  video_bit_rate: 12000000   # 原画档码率（bps）
+  min_video_bit_rate: 300000 # 弱网自动降码率的地板（bps）
+  clear_bitrate: 3000000     # 清晰档码率（bps）
+  hd_bitrate: 6000000        # 高清档码率（bps）
+  warm_keep_seconds: 300     # 浏览器断开后 scrcpy 保活时长（秒），窗口内重连免冷启动
+  audio_bit_rate: 256000
+  video_codec: "h264"
+  audio_codec: "opus"
+  audio_enabled: true
+  power_on: true
+  stay_awake: true
+  video_keyframe_interval: 2    # 2 秒 GOP：弱网实测远优于 20s（30% 丢包下 冻结→流畅30fps）
+  fec_disabled: false
+

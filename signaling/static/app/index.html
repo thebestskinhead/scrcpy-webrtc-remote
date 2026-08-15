@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>云游戏</title>
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- ========== Root（旋转容器，触控坐标映射依赖 #root.rotated） ========== -->
+<div id="root" data-ui="idle">
+
+  <!-- ========== 远端画面 ========== -->
+  <div id="app">
+    <div class="screen" id="videoContainer">
+      <video id="remoteVideo" autoplay playsinline muted
+        webkit-playsinline="true"
+        x5-playsinline="true"
+        x5-video-player-type="h5"
+        x5-video-player-fullscreen="false"
+      ></video>
+      <div id="controlOverlay"></div>
+    </div>
+  </div>
+
+  <!-- ========== 入口页 ========== -->
+  <section class="ui-screen screen-idle" id="screenIdle">
+    <div class="idle-glow"></div>
+    <div class="idle-logo">
+      <svg width="52" height="52" viewBox="0 0 48 48" fill="none">
+        <path d="M14 14h20a12 12 0 0 1 11.8 14.2l-1.5 7.5a6 6 0 0 1-10.4 2.6L30 34H18l-3.9 4.3a6 6 0 0 1-10.4-2.6l-1.5-7.5A12 12 0 0 1 14 14Z" fill="url(#lg)" stroke="#fff" stroke-opacity=".9" stroke-width="1.6"/>
+        <path d="M17 21v6M14 24h6" stroke="#0b0e1a" stroke-width="2.2" stroke-linecap="round"/>
+        <circle cx="30" cy="22" r="1.8" fill="#0b0e1a"/><circle cx="34" cy="26" r="1.8" fill="#0b0e1a"/>
+        <defs><linearGradient id="lg" x1="0" y1="0" x2="48" y2="48"><stop stop-color="#8f7bff"/><stop offset="1" stop-color="#3ae2ff"/></linearGradient></defs>
+      </svg>
+    </div>
+    <h1 class="idle-title" id="idleTitle">云游戏</h1>
+    <p class="idle-sub" id="idleSub">免下载 · 即点即玩</p>
+
+    <button class="btn-primary big" id="connectBtn">
+      <svg width="18" height="18" viewBox="0 0 16 16"><path d="M5 3.2v9.6a.6.6 0 0 0 .92.5l7.2-4.8a.6.6 0 0 0 0-1L5.92 2.7a.6.6 0 0 0-.92.5Z" fill="currentColor"/></svg>
+      进入游戏
+    </button>
+
+    <div class="last-session hidden" id="lastSession">
+      <div class="ls-info">
+        <div class="ls-name" id="lsName">云端设备</div>
+        <div class="ls-meta">上次使用 · 刚刚</div>
+      </div>
+      <button class="btn-mini" id="reconnectLastBtn">一键重连</button>
+    </div>
+
+    <button class="btn-link" id="manualToggle">手动输入连接信息</button>
+    <div class="manual-form" id="manualForm">
+      <input type="text" id="svcInput" class="inp" placeholder="服务 ID" autocomplete="off">
+      <input type="text" id="instInput" class="inp" placeholder="设备 ID" autocomplete="off">
+    </div>
+
+    <div class="idle-foot"><span id="verTap">v1.0.0</span></div>
+  </section>
+
+  <!-- ========== 连接中 ========== -->
+  <section class="ui-screen screen-conn" id="screenConn">
+    <div class="conn-ring">
+      <svg viewBox="0 0 120 120" width="132" height="132">
+        <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="7"/>
+        <circle id="connRingFill" cx="60" cy="60" r="52" fill="none" stroke="url(#pg)" stroke-width="7"
+                stroke-linecap="round" stroke-dasharray="326.7" stroke-dashoffset="326.7"
+                transform="rotate(-90 60 60)"/>
+        <defs><linearGradient id="pg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#8f7bff"/><stop offset="1" stop-color="#3ae2ff"/></linearGradient></defs>
+      </svg>
+      <div class="conn-pct" id="connPct">0%</div>
+    </div>
+    <div class="conn-stage-title" id="connStageTitle">正在连接云端设备…</div>
+    <div class="conn-stage-sub" id="connStageSub">预计需要几秒钟</div>
+    <ol class="conn-steps" id="connSteps">
+      <li data-i="0"><span class="cs-dot"></span>连接云端设备</li>
+      <li data-i="1"><span class="cs-dot"></span>建立网络通道</li>
+      <li data-i="2"><span class="cs-dot"></span>加载游戏画面</li>
+    </ol>
+    <button class="btn-ghost" id="cancelConnBtn">取消</button>
+  </section>
+
+  <!-- ========== 全屏错误页 ========== -->
+  <section class="ui-screen screen-error" id="screenError">
+    <div class="err-icon">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none">
+        <path d="M2.5 8.5a15 15 0 0 1 19 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".35"/>
+        <path d="M5.8 12a10 10 0 0 1 12.4 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".6"/>
+        <path d="M9 15.4a5.4 5.4 0 0 1 6 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="12" cy="18.8" r="1.3" fill="currentColor"/>
+        <path d="M3 3l18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div class="err-title" id="errTitle">连不上这台设备</div>
+    <div class="err-msg" id="errMsg"></div>
+    <div class="err-actions">
+      <button class="btn-primary" id="errorRetryBtn">重试连接</button>
+      <button class="btn-ghost" id="errorHomeBtn">返回首页</button>
+    </div>
+    <button class="btn-link" id="errDetailToggle">查看技术详情</button>
+    <pre class="err-detail" id="errDetail"></pre>
+    <button class="btn-link dim">联系客服</button>
+  </section>
+
+  <!-- ========== 断线重连蒙层 ========== -->
+  <div class="ov-reconnect" id="ovReconnect">
+    <div class="rc-ring"></div>
+    <div class="rc-title">连接中断，正在重连</div>
+    <div class="rc-sub" id="rcSub">第 1/5 次尝试</div>
+    <div class="rc-count" id="rcCount">即将重试</div>
+    <button class="btn-primary" id="rcNowBtn">立即重试</button>
+    <button class="btn-link" id="rcExitBtn">退出游戏</button>
+  </div>
+
+  <!-- ========== 弱网徽标 ========== -->
+  <div class="net-badge hidden" id="netBadge"><span class="nb-dot"></span>网络不佳</div>
+  <div class="net-card hidden" id="netCard">
+    <div class="nc-title">当前网络较弱</div>
+    <div class="nc-desc">已自动降低画质以保证流畅，网络恢复后会自动调回。</div>
+    <div class="nc-row"><span>延迟</span><b id="ncRtt">-</b></div>
+    <div class="nc-row"><span>丢包</span><b id="ncLoss">-</b></div>
+  </div>
+
+  <!-- ========== 网络 HUD（stats.js 直接写入，保留原 id） ========== -->
+  <div class="net-hud hidden" id="netHud">
+    <div class="hud-item"><i>延迟</i><span class="hud-val" id="hudRtt">-</span></div>
+    <div class="hud-item"><i>丢包</i><span class="hud-val" id="hudLoss">-</span></div>
+    <div class="hud-item"><i>帧率</i><span class="hud-val" id="hudFps">-</span></div>
+    <div class="hud-item"><i>码率</i><span class="hud-val" id="hudBitrate">-</span></div>
+  </div>
+
+  <!-- ========== 悬浮球 ========== -->
+  <div class="fab hidden" id="fab">
+    <svg width="20" height="20" viewBox="0 0 20 20"><rect x="2" y="4" width="16" height="2.2" rx="1.1" fill="#fff"/><rect x="2" y="9" width="16" height="2.2" rx="1.1" fill="#fff"/><rect x="2" y="14" width="10" height="2.2" rx="1.1" fill="#fff"/></svg>
+  </div>
+  <div class="fab-menu hidden" id="fabMenu">
+    <button data-act="back"><i class="mi mi-back"></i>返回</button>
+    <button data-act="home"><i class="mi mi-home"></i>主页</button>
+    <button data-act="app_switch"><i class="mi mi-tasks"></i>最近任务</button>
+    <button data-act="keyboard"><i class="mi mi-kbd"></i>键盘输入</button>
+    <button data-act="clipboard"><i class="mi mi-clip"></i>剪贴板</button>
+    <button data-act="settings"><i class="mi mi-gear"></i>设置</button>
+    <button data-act="exit" class="danger"><i class="mi mi-exit"></i>断开连接</button>
+  </div>
+
+  <!-- ========== 弹层遮罩 ========== -->
+  <div class="sheet-mask hidden" id="sheetMask"></div>
+
+  <!-- ========== 剪贴板 ========== -->
+  <div class="sheet" id="sheetClipboard">
+    <div class="sheet-grab"></div>
+    <div class="sheet-title">剪贴板同步</div>
+    <div class="sheet-desc">在你的设备与云端设备之间同步文本内容</div>
+    <button class="clip-card" id="clipSendBtn">
+      <i class="mi mi-up"></i>
+      <div><b>发送到云端设备</b><span>读取本地剪贴板并发送</span></div>
+    </button>
+    <button class="clip-card" id="clipGetBtn">
+      <i class="mi mi-down"></i>
+      <div><b>从云端设备获取</b><span>拉取云端剪贴板，写入本地</span></div>
+    </button>
+    <div class="clip-confirm hidden" id="clipConfirm">
+      <span>从设备获取会将云端内容写入本地剪贴板，可能包含敏感信息。</span>
+      <div class="cc-actions">
+        <button class="btn-mini ghost" id="clipCancelBtn">取消</button>
+        <button class="btn-mini" id="clipOkBtn">确认获取</button>
+      </div>
+    </div>
+    <div class="sheet-note">提示：在任意页面按 Ctrl+V（或长按粘贴）也可以直接把文本发送到云端输入框。</div>
+  </div>
+
+  <!-- ========== 键盘输入 ========== -->
+  <div class="sheet" id="sheetKeyboard">
+    <div class="sheet-grab"></div>
+    <div class="sheet-title">键盘输入</div>
+    <div class="sheet-desc">把文字输入到云端设备当前聚焦的输入框</div>
+    <div class="kbd-row">
+      <input type="text" id="kbdInput" class="inp" placeholder="输入文字…" autocomplete="off">
+      <button class="btn-primary" id="kbdSendBtn">发送</button>
+    </div>
+    <div class="kbd-options">
+      <label class="kbd-enter"><input type="checkbox" id="kbdEnter"> 发送后按回车</label>
+    </div>
+    <div class="sheet-note">外接物理键盘可直接打字；中文输入法上屏的文字会自动同步到云端。</div>
+  </div>
+
+  <!-- ========== 设置 ========== -->
+  <div class="sheet sheet-tall" id="sheetSettings">
+    <div class="sheet-grab"></div>
+    <div class="sheet-title">设置</div>
+
+    <div class="set-sec">画面方向</div>
+    <div class="pill-row" id="orientRow">
+      <button class="pill active" data-o="follow">跟随内容</button>
+      <button class="pill" data-o="portrait">锁定竖屏</button>
+      <button class="pill" data-o="landscape">锁定横屏</button>
+    </div>
+
+    <div class="set-row">
+      <div class="set-info"><b>声音</b><span>云端设备音频</span></div>
+      <label class="tgl"><input type="checkbox" id="tglAudio" checked><span></span></label>
+    </div>
+    <div class="set-row">
+      <div class="set-info"><b>网络状态悬浮窗</b><span>显示延迟 / 丢包 / 帧率</span></div>
+      <label class="tgl"><input type="checkbox" id="hudToggle"><span></span></label>
+    </div>
+
+    <div class="set-sec">画面</div>
+    <div class="pill-row" id="qualityRow">
+      <button class="pill" data-q="clear">清晰</button>
+      <button class="pill" data-q="hd">高清</button>
+      <button class="pill active" data-q="original">原画</button>
+    </div>
+    <div class="sheet-note">切换清晰度只调整码率，分辨率保持不变</div>
+    <button class="btn-ghost btn-full" id="fullscreenToggle">全屏模式</button>
+    <button class="btn-ghost btn-full" id="keyframeBtn">画面卡死？修复视频流</button>
+
+    <div class="dev-zone hidden" id="devZone">
+      <div class="set-sec">开发者模式 · 实时流指标</div>
+      <div class="dev-conn" id="devConnType">连接模式：检测中…</div>
+      <div class="dev-grid">
+        <div class="dev-item"><i>分辨率</i><b id="statResolution">-</b></div>
+        <div class="dev-item"><i>帧率</i><b id="statFps">-</b></div>
+        <div class="dev-item"><i>视频码率</i><b id="statVBitrate">-</b></div>
+        <div class="dev-item"><i>抖动</i><b id="statVJitter">-</b></div>
+        <div class="dev-item"><i>丢包</i><b id="statVLoss">-</b></div>
+        <div class="dev-item"><i>掉帧</i><b id="statVDropped">-</b></div>
+        <div class="dev-item"><i>NACK / PLI</i><b id="statVNackPli">-</b></div>
+        <div class="dev-item"><i>RTT</i><b id="statRtt">-</b></div>
+        <div class="dev-item"><i>音频码率</i><b id="statABitrate">-</b></div>
+        <div class="dev-item"><i>音频抖动</i><b id="statAJitter">-</b></div>
+        <div class="dev-item"><i>音频丢包</i><b id="statALoss">-</b></div>
+        <div class="dev-item"><i>已解码采样</i><b id="statADecoded">-</b></div>
+      </div>
+    </div>
+
+    <div class="sheet-note center"><span id="verTap2">v1.0.0 (build 1024)</span></div>
+  </div>
+
+  <!-- ========== 设备占用确认 ========== -->
+  <div class="dlg-wrap hidden" id="preemptDialog">
+    <div class="dlg-mask"></div>
+    <div class="dlg">
+      <div class="dlg-icon warn">
+        <svg width="26" height="26" viewBox="0 0 24 24"><path d="M12 3 2.5 19.5h19L12 3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.5v4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1.1" fill="currentColor"/></svg>
+      </div>
+      <div class="dlg-title">这台设备正在被使用</div>
+      <div class="dlg-msg" id="preemptInfo">你可以等对方结束后再试，或直接接管使用。</div>
+      <div class="dlg-actions">
+        <button class="btn-ghost" id="preemptCancelBtn">稍后再试</button>
+        <button class="btn-primary" id="preemptConfirmBtn">接管使用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 退出确认 ========== -->
+  <div class="dlg-wrap hidden" id="dlgExit">
+    <div class="dlg-mask"></div>
+    <div class="dlg">
+      <div class="dlg-title">退出游戏？</div>
+      <div class="dlg-msg">云端进度可能未保存，确定要断开连接吗？</div>
+      <div class="dlg-actions">
+        <button class="btn-ghost" id="exitCancelBtn">再玩一会</button>
+        <button class="btn-danger" id="exitOkBtn">退出</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== Toast ========== -->
+  <div id="toast"></div>
+
+</div><!-- #root -->
+
+<script src="js/connection.js"></script>
+<script src="js/stats.js"></script>
+<script src="js/input.js"></script>
+<script src="js/actions.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
