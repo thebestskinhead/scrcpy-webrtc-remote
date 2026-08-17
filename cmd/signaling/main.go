@@ -97,7 +97,7 @@ func main() {
 		fmt.Fprintf(w, `{"status":"ok","agents":%d}`, len(sig.Agents()))
 	})
 
-	// API — agent list / health (same shapes as cmd/webserver)
+	// API — agent list / health
 	mux.HandleFunc("GET /api/agents", func(w http.ResponseWriter, r *http.Request) {
 		type resp struct {
 			ServiceID    string `json:"service_id"`

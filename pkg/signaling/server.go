@@ -333,11 +333,21 @@ func (s *Server) forwardToBrowser(msg common.WsMsg) {
 	}
 }
 
+// preemptBrowser tells the old browser it has been preempted, then closes its
+// WS. Sending the preempted message BEFORE closing is essential: the frontend
+// uses it to show "signed in elsewhere / this session is offline" and to stop
+// its auto-reconnect loop. A bare Close() looks like an ordinary network drop
+// to the browser, so it reconnects, which preempts again — an infinite ping-
+// pong between two clients fighting over the same device.
 func (s *Server) preemptBrowser(sessionID string) {
 	s.browserSessionMu.Lock()
 	defer s.browserSessionMu.Unlock()
 	for ws, sess := range s.browserSessions {
 		if sess.sessionID == sessionID {
+			writeWS(ws, common.WsMsg{
+				Type:      common.TypePreempted,
+				SessionID: sessionID,
+			})
 			ws.Close()
 			delete(s.browserSessions, ws)
 			return

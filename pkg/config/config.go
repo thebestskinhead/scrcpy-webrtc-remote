@@ -97,6 +97,10 @@ type AgentConfig struct {
 	STUNServers  []string          `yaml:"stun_servers"`
 	TURNServer   *TurnServerConfig `yaml:"turn_server"`
 	Scrcpy       ScrcpyConfig      `yaml:"scrcpy"`
+	// ADBPath 指定 adb 可执行文件路径。为空时依赖 PATH 中的 "adb"
+	// （手动运行 build/agent 时 PATH 常无 adb，需显式配置，否则
+	// scrcpy server 无法启动，会话直接 Error）。
+	ADBPath string `yaml:"adb_path"`
 }
 
 // InstanceConfig describes a single device managed by the agent.

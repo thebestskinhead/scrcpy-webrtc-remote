@@ -28,7 +28,7 @@ html, body {
 button { font-family:inherit; border:none; background:none; color:inherit; cursor:pointer; }
 .hidden { display:none !important; }
 
-/* ---- Root（自动旋转 FSM 容器，input.js 依赖 .rotated） ---- */
+/* ---- Root（自动旋转 FSM 容器，SDK InputController 依赖 .rotated） ---- */
 #root { position:fixed; inset:0; overflow:hidden; }
 #root.rotated {
   width:100vh; height:100vw;
@@ -219,7 +219,7 @@ video {
 .nc-row { display:flex; justify-content:space-between; margin-top:10px; font-size:12px; color:var(--ink-dim); }
 .nc-row b { color:var(--ink); font-variant-numeric:tabular-nums; }
 
-/* ---- HUD（stats.js 写入 .hud-val） ---- */
+/* ---- HUD（SDK StatsMonitor 写入 .hud-val） ---- */
 .net-hud {
   position:absolute; top:14px; left:50%; transform:translateX(-50%); z-index:15;
   display:flex; gap:16px; padding:8px 16px; border-radius:12px;

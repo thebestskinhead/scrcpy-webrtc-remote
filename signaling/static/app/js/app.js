@@ -15,19 +15,7 @@
   'use strict';
 
   window.CG = window.CG || {};
-
-  // ---- 事件总线 ----
-  const listeners = {};
-  window.CG.events = {
-    on(evt, fn) { (listeners[evt] = listeners[evt] || []).push(fn); },
-    off(evt, fn) {
-      const arr = listeners[evt];
-      if (arr) { const i = arr.indexOf(fn); if (i >= 0) arr.splice(i, 1); }
-    },
-    emit(evt, data) { (listeners[evt] || []).forEach(fn => fn(data)); },
-  };
-
-  window.CG.log = (msg) => console.log('[CG] ' + msg);
+  // 事件总线 / 日志 由 cg-sdk.js 提供；此处仅把 toast 重新指向 UI 层
   window.CG.toast = (msg, type) => { if (app && app.ui) app.ui.toast(msg, type); };
 
   // ---- 技术步骤 → 用户旅程映射 ----
@@ -134,9 +122,6 @@
         this.ui.toast('设备已被其他用户接管，连接已断开', 'error');
         this.ui.showIdle({ svcId: this._svc, instId: this._inst, lastSession: this._lastSession });
       });
-
-      // 连接模式（P2P / TURN）→ 开发者面板
-      E.on('connection-type', d => this.ui.setDevConnType(d.label));
 
       // HUD 开关 → stats 写入许可
       E.on('hud-toggle', v => this.stats.setHudVisible(v));

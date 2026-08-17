@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Scrcpy WebRTC Remote - 开发调试脚本（go run 模式: signaling + agent）
 

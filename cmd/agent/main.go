@@ -34,7 +34,7 @@ func main() {
 
 	// Auto-connect TCP/IP devices (e.g. 127.0.0.1:16384) that are not yet
 	// listed in `adb devices`.
-	agent.AutoConnectDevices(instances)
+	agent.AutoConnectDevices(*cfg, instances)
 
 	// Create a shared port pool across all instances.
 	// Each Controller had its own pool with the same range [30000..30099],

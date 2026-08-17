@@ -228,6 +228,11 @@ func (s *Session) SetForwardPaused(paused bool) {
 	logger.Info("session forward paused state changed", "serial", s.serial, "paused", paused)
 }
 
+// ForwardPaused 返回当前 forward 是否暂停。
+func (s *Session) ForwardPaused() bool {
+	return s.forwardPaused.Load()
+}
+
 // StartForwarders 启动 forwardVideo、forwardAudio 和 controlReader。
 // 调用方允许重复调用（通过 forwardersStarted 保护）。
 func (s *Session) StartForwarders() {

@@ -19,6 +19,7 @@ import (
 
 	"scrcpy-webrtc-remote/agent/internal/gateway"
 	"scrcpy-webrtc-remote/pkg/config"
+	"scrcpy-webrtc-remote/pkg/debughooks"
 	"scrcpy-webrtc-remote/pkg/logger"
 )
 
@@ -271,6 +272,11 @@ type PeerManager struct {
 	fecEnabledFlag  atomic.Bool
 	lastFECToggle   time.Time
 	currentBitrate  atomic.Int32 // current video bitrate (bps), used to gate FEC
+
+	// debug is the optional debug extension hook (nil in open-source builds).
+	// PLI/RTCP debug logging and extra interceptors (e.g. netem weak-network
+	// simulation) are provided by the injected closed-source implementation.
+	debug debughooks.Hooks
 }
 
 const (
@@ -279,7 +285,7 @@ const (
 	pliStateReset   = 2 // L2: full encoder reset (10s throttle, 15s min)
 )
 
-func NewPeerManager(serial string, stunServers []string, turnServer *config.TurnServerConfig, videoCodec string, profileLevelID string, audioCodec string, audioEnabled bool) (*PeerManager, error) {
+func NewPeerManager(serial string, stunServers []string, turnServer *config.TurnServerConfig, videoCodec string, profileLevelID string, audioCodec string, audioEnabled bool, debug debughooks.Hooks) (*PeerManager, error) {
 	if profileLevelID == "" {
 		profileLevelID = "42e01f"
 	}
@@ -402,7 +408,16 @@ func NewPeerManager(serial string, stunServers []string, turnServer *config.Turn
 
 	registry := &interceptor.Registry{}
 	// Socket-side → track-side registration order:
-	//   nackResp → redInt → delayer
+	//   [debug hooks] nackResp → redInt → delayer
+	// Debug hooks may register extra interceptors at the socket edge (e.g.
+	// netem weak-network simulator, which must sit ABOVE nackResp so dropped
+	// packets are still buffered and retransmittable) — nil in open-source
+	// builds.
+	if debug != nil {
+		for _, f := range debug.CreateInterceptors() {
+			registry.Add(f)
+		}
+	}
 	registry.Add(nackResp)
 	registry.Add(redInt)
 	registry.Add(delayer)
@@ -491,6 +506,7 @@ func NewPeerManager(serial string, stunServers []string, turnServer *config.Turn
 		redInterceptor:  redInt,
 		lastDecodedTime: now,
 		pliBaseInterval: 1 * time.Second,
+		debug:           debug,
 	}
 
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
@@ -749,6 +765,14 @@ func (pm *PeerManager) IsConnected() bool {
 	return pm.pc.ConnectionState() == webrtc.PeerConnectionStateConnected
 }
 
+// PeerState 返回 PeerConnection 状态字符串。
+func (pm *PeerManager) PeerState() string {
+	if pm == nil || pm.pc == nil {
+		return "-"
+	}
+	return pm.pc.ConnectionState().String()
+}
+
 func (pm *PeerManager) UpdateFramesDecoded(decoded uint32) {
 	if decoded > pm.lastDecoded {
 		pm.lastDecoded = decoded
@@ -847,6 +871,9 @@ func (pm *PeerManager) rtcpListener() {
 					pm.decodedAtStateChange = pm.lastDecoded
 					logger.Warn("PLI L1: requesting lightweight IDR",
 						"serial", pm.serial, "count", pm.pliCount)
+					if pm.debug != nil {
+						pm.debug.Logf("[rtcp] PLI L1: requesting lightweight IDR (count=%d)", pm.pliCount)
+					}
 					if pm.onRequestKeyframe != nil {
 						go pm.onRequestKeyframe()
 					}
@@ -857,6 +884,9 @@ func (pm *PeerManager) rtcpListener() {
 						if now.Sub(pm.lastResetTime) < minResetInterval {
 							logger.Warn("PLI L2: reset throttled",
 								"serial", pm.serial, "since", now.Sub(pm.lastResetTime))
+							if pm.debug != nil {
+								pm.debug.Logf("[rtcp] PLI L2: reset throttled (since=%s)", now.Sub(pm.lastResetTime))
+							}
 							continue
 						}
 						pm.pliState = pliStateReset
@@ -864,12 +894,18 @@ func (pm *PeerManager) rtcpListener() {
 						pm.lastResetTime = now
 						logger.Error("PLI L2: stream unrecoverable, resetting encoder",
 							"serial", pm.serial)
+						if pm.debug != nil {
+							pm.debug.Logf("[rtcp] PLI L2: stream unrecoverable, resetting encoder")
+						}
 						if pm.onResetVideo != nil {
 							go pm.onResetVideo()
 						}
 					} else {
 						logger.Warn("PLI L1: requesting lightweight IDR",
 							"serial", pm.serial, "count", pm.pliCount)
+						if pm.debug != nil {
+							pm.debug.Logf("[rtcp] PLI L1: requesting lightweight IDR (count=%d)", pm.pliCount)
+						}
 						if pm.onRequestKeyframe != nil {
 							go pm.onRequestKeyframe()
 						}
@@ -880,6 +916,9 @@ func (pm *PeerManager) rtcpListener() {
 						pm.lastResetTime = now
 						logger.Error("PLI L2: retry encoder reset",
 							"serial", pm.serial)
+						if pm.debug != nil {
+							pm.debug.Logf("[rtcp] PLI L2: retry encoder reset")
+						}
 						if pm.onResetVideo != nil {
 							go pm.onResetVideo()
 						}
@@ -888,6 +927,9 @@ func (pm *PeerManager) rtcpListener() {
 
 			case *rtcp.FullIntraRequest:
 				logger.Warn("RTCP FIR received", "serial", pm.serial)
+				if pm.debug != nil {
+					pm.debug.Logf("[rtcp] FIR received")
+				}
 				if time.Since(lastFIR) < minResetInterval {
 					continue
 				}

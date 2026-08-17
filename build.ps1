@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     scrcpy-webrtc-remote - 一键构建 & 打包脚本
 

@@ -2,6 +2,11 @@
 # WebSocket URL of the signaling server
 signaling_url: "ws://127.0.0.1:8080"
 
+# adb 可执行文件路径（可选）。为空时依赖 PATH 中的 "adb"；
+# 手动运行 agent 时 PATH 常无 adb，建议显式配置，否则 scrcpy
+# server 无法启动、会话直接 Error。
+adb_path: "adb"
+
 # Shared service identity (browser connects with this service_id)
 service_id: "demo-service"
 

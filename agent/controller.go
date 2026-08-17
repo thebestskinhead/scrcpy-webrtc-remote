@@ -15,6 +15,7 @@ import (
 	bridgewebrtc "scrcpy-webrtc-remote/agent/internal/webrtc"
 	"scrcpy-webrtc-remote/pkg/common"
 	"scrcpy-webrtc-remote/pkg/config"
+	"scrcpy-webrtc-remote/pkg/debughooks"
 	"scrcpy-webrtc-remote/pkg/logger"
 )
 
@@ -93,6 +94,12 @@ type SessionCtx struct {
 	// Track the magnitude of the last bitrate drop to detect overly
 	// aggressive BWE reactions.
 	lastBitrateDropPct float64
+
+	// debug is the optional debug extension hook (nil in open-source
+	// builds; a closed-source Hooks implementation is injected by the
+	// platform binary). All debug protocol handling, metric sampling and
+	// weak-network simulation live behind this nil-checked interface.
+	debug debughooks.Hooks
 }
 
 // Controller is the agent-side orchestrator for one device instance.
@@ -123,6 +130,16 @@ type Controller struct {
 	// controller level so reconnects and new sessions inherit it.
 	// 0 means "not explicitly selected" → use scrcpy.video_bit_rate (原画).
 	qualityBitrate atomic.Int64
+
+	// debug is the optional debug extension hook propagated to every
+	// SessionCtx. nil in open-source builds.
+	debug debughooks.Hooks
+}
+
+// SetDebugHooks injects the optional debug extension (closed-source).
+// Passing nil disables all debug functionality. Must be called before Run.
+func (c *Controller) SetDebugHooks(h debughooks.Hooks) {
+	c.debug = h
 }
 
 // NewSharedPortPool creates a port pool that should be shared across all
@@ -133,8 +150,8 @@ func NewSharedPortPool(start, size int) *portpool.Pool {
 
 // AutoConnectDevices checks each configured device against `adb devices`
 // and runs `adb connect` for any TCP/IP device not yet connected.
-func AutoConnectDevices(instances []config.InstanceConfig) {
-	adbCli := adb.New("adb")
+func AutoConnectDevices(agentCfg config.AgentConfig, instances []config.InstanceConfig) {
+	adbCli := adb.New(agentCfg.ADBPath)
 	connected, err := adbCli.Devices()
 	if err != nil {
 		logger.Warn("adb devices failed, skipping auto-connect", "err", err)
@@ -510,6 +527,7 @@ func (c *Controller) newSessionCtx(id string) *SessionCtx {
 		// Inherit the user-selected quality tier (0 → 原画 = video_bit_rate).
 		initialBitrate: c.currentQualityBitrate(),
 		lastBitrate:    c.currentQualityBitrate(),
+		debug:          c.debug,
 	}
 }
 
@@ -655,8 +673,44 @@ func (ctx *SessionCtx) run() {
 				logger.Warn("session unknown msg type",
 					"type", msg.Type, "session_id", ctx.id)
 			}
+
+			// Debug hooks: periodic metric sampling + auto-stop when the
+			// collection duration expires. Both are no-ops when debug is
+			// nil (open-source builds).
+			if ctx.debug != nil {
+				ctx.debug.OnSessionEvent(ctx.sessionMetrics())
+				if ctx.debug.Active() && ctx.debug.Remaining() == 0 {
+					ctx.debug.HandleControl("debug_stop", nil)
+				}
+			}
 		}
 	}
+}
+
+// sessionMetrics collects a snapshot of internal session state for the
+// debug hooks. Plain counter reads; harmless in open-source builds.
+func (ctx *SessionCtx) sessionMetrics() debughooks.SessionMetrics {
+	m := debughooks.SessionMetrics{
+		EventQLen: len(ctx.eventQueue),
+		Bitrate:   ctx.lastBitrate,
+	}
+	var sessState string
+	var paused bool
+	ctx.mu.Lock()
+	s := ctx.session
+	ctx.mu.Unlock()
+	if s != nil {
+		m.VideoChLen = len(s.VideoCh)
+		m.CtrlChLen = len(s.CtrlCh)
+		sessState = string(s.State())
+		paused = s.ForwardPaused()
+	}
+	m.SessionState = sessState
+	m.Paused = paused
+	if ctx.peer != nil {
+		m.PeerState = ctx.peer.PeerState()
+	}
+	return m
 }
 
 // ---------------------------------------------------------------------------
@@ -706,11 +760,16 @@ func (ctx *SessionCtx) handleOffer(msg common.WsMsg) error {
 		scfg.VideoCodec, "42e01f",
 		scfg.AudioCodec,
 		scfg.AudioEnabled,
+		ctx.debug,
 	)
 	if err != nil {
 		return fmt.Errorf("create peer manager: %w", err)
 	}
 	ctx.peer = pm
+	// Hand the hooks a way to push debug logs over the browser DataChannel.
+	if ctx.debug != nil {
+		ctx.debug.BindPeer(pm.SendControl)
+	}
 
 	ctx.mu.Lock()
 	ctx.sessionReady = make(chan struct{})
@@ -742,6 +801,15 @@ func (ctx *SessionCtx) handleOffer(msg common.WsMsg) error {
 				uint32(getFloat64(d, "action_button")),
 				uint32(getFloat64(d, "buttons")),
 			)
+			// Debug hooks: record DC → scrcpy injection latency when the
+			// frontend stamped the touch with a timestamp (closed-source).
+			if ctx.debug != nil && ctx.debug.Active() {
+				if ts, ok := d["ts"].(float64); ok {
+					ctx.debug.Logf("[touch] action=%d dc->scrcpy latency=%.1fms",
+						byte(getFloat64(d, "action")),
+						float64(time.Now().UnixMilli())-ts)
+				}
+			}
 			ctx.sendCtrl(b)
 		case "inject_scroll":
 			d, _ := ctrl["data"].(map[string]any)
@@ -806,6 +874,13 @@ func (ctx *SessionCtx) handleOffer(msg common.WsMsg) error {
 				logger.Warn("set_quality dropped: event queue full", "session_id", ctx.id)
 			}
 		default:
+			// Unknown control types are offered to the debug hooks first
+			// (debug_start/debug_stop/debug_fetch etc. in closed-source
+			// builds). In open-source builds ctx.debug is nil and every
+			// unknown message falls through to the warning.
+			if ctx.debug != nil && ctx.debug.HandleControl(msgType, ctrl) {
+				return
+			}
 			logger.Warn("unknown control type", "type", msgType)
 		}
 	})
@@ -1022,6 +1097,9 @@ func (ctx *SessionCtx) watchSessionDeath(s *gateway.Session) {
 func (ctx *SessionCtx) sendCtrl(b []byte) {
 	if s := ctx.getSession(); s != nil {
 		_ = s.SendControl(b)
+		if ctx.debug != nil {
+			ctx.debug.OnControlSent(b)
+		}
 	}
 }
 
@@ -1172,6 +1250,10 @@ func (ctx *SessionCtx) maybeAdjustBitrate(data map[string]any) {
 	ctx.lastBitrateChange = time.Now()
 	ctx.lastLossLowTime = time.Time{} // reset recovery timer
 	ctx.sendCtrl(gateway.BuildChangeBitrate(target))
+	if ctx.debug != nil {
+		ctx.debug.Logf("[bwe] bitrate %d -> %d (loss=%.1f%%)",
+			prev, target, lossRate)
+	}
 
 	// Keep the FEC evaluator in sync with the current encoder bitrate
 	if ctx.peer != nil {

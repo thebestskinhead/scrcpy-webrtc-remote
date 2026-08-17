@@ -18,7 +18,6 @@
  *   toast(msg, type)
  *   applyAutoRotate()
  *   setNetBadge(show) / updateNetCard(rtt, loss)
- *   setDevConnType(label)
  *   audioMuted (getter)
  */
 (function() {
@@ -33,8 +32,6 @@
       this._audioMuted = true;        // 首次手势解锁前保持静音（自动播放策略）
       this._soundOn = true;           // 用户意图：声音开
       this._orientMode = 'follow';    // follow | portrait | landscape
-      this._devMode = false;
-      this._devTaps = 0;
       this._initFab();
       this._initSheets();
       this._initSettings();
@@ -43,7 +40,6 @@
       this._initAutoRotate();
       this._initUnlockAudio();
       this._initNetBadge();
-      this._initDevMode();
     }
 
     // ================================================================
@@ -211,10 +207,6 @@
     updateNetCard(rtt, loss) {
       this._setText('ncRtt', rtt != null ? Math.round(rtt) + ' ms' : '-');
       this._setText('ncLoss', loss != null ? loss.toFixed(1) + ' %' : '-');
-    }
-
-    setDevConnType(label) {
-      this._setText('devConnType', '连接模式：' + label);
     }
 
     // ================================================================
@@ -395,29 +387,6 @@
         document.getElementById('manualForm')?.classList.toggle('open');
       });
     }
-
-    // ================================================================
-    // 开发者模式：连点版本号 5 次
-    // ================================================================
-    _initDevMode() {
-      const tap = () => {
-        if (this._devMode) return;
-        this._devTaps++;
-        if (this._devTaps >= 5) {
-          this._devMode = true;
-          document.getElementById('devZone')?.classList.remove('hidden');
-          CG.toast('开发者模式已开启', 'success');
-        } else if (this._devTaps >= 2) {
-          CG.toast(`再点 ${5 - this._devTaps} 次开启开发者模式`);
-        }
-        clearTimeout(this._devTapTimer);
-        this._devTapTimer = setTimeout(() => this._devTaps = 0, 2000);
-      };
-      document.getElementById('verTap')?.addEventListener('click', tap);
-      document.getElementById('verTap2')?.addEventListener('click', tap);
-    }
-
-    get isDevMode() { return this._devMode; }
 
     // ================================================================
     // 音频

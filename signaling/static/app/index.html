@@ -123,7 +123,7 @@
     <div class="nc-row"><span>丢包</span><b id="ncLoss">-</b></div>
   </div>
 
-  <!-- ========== 网络 HUD（stats.js 直接写入，保留原 id） ========== -->
+  <!-- ========== 网络 HUD（SDK StatsMonitor 写入，保留原 id） ========== -->
   <div class="net-hud hidden" id="netHud">
     <div class="hud-item"><i>延迟</i><span class="hud-val" id="hudRtt">-</span></div>
     <div class="hud-item"><i>丢包</i><span class="hud-val" id="hudLoss">-</span></div>
@@ -217,25 +217,6 @@
     <button class="btn-ghost btn-full" id="fullscreenToggle">全屏模式</button>
     <button class="btn-ghost btn-full" id="keyframeBtn">画面卡死？修复视频流</button>
 
-    <div class="dev-zone hidden" id="devZone">
-      <div class="set-sec">开发者模式 · 实时流指标</div>
-      <div class="dev-conn" id="devConnType">连接模式：检测中…</div>
-      <div class="dev-grid">
-        <div class="dev-item"><i>分辨率</i><b id="statResolution">-</b></div>
-        <div class="dev-item"><i>帧率</i><b id="statFps">-</b></div>
-        <div class="dev-item"><i>视频码率</i><b id="statVBitrate">-</b></div>
-        <div class="dev-item"><i>抖动</i><b id="statVJitter">-</b></div>
-        <div class="dev-item"><i>丢包</i><b id="statVLoss">-</b></div>
-        <div class="dev-item"><i>掉帧</i><b id="statVDropped">-</b></div>
-        <div class="dev-item"><i>NACK / PLI</i><b id="statVNackPli">-</b></div>
-        <div class="dev-item"><i>RTT</i><b id="statRtt">-</b></div>
-        <div class="dev-item"><i>音频码率</i><b id="statABitrate">-</b></div>
-        <div class="dev-item"><i>音频抖动</i><b id="statAJitter">-</b></div>
-        <div class="dev-item"><i>音频丢包</i><b id="statALoss">-</b></div>
-        <div class="dev-item"><i>已解码采样</i><b id="statADecoded">-</b></div>
-      </div>
-    </div>
-
     <div class="sheet-note center"><span id="verTap2">v1.0.0 (build 1024)</span></div>
   </div>
 
@@ -273,9 +254,7 @@
 
 </div><!-- #root -->
 
-<script src="js/connection.js"></script>
-<script src="js/stats.js"></script>
-<script src="js/input.js"></script>
+<script src="js/cg-sdk.js"></script>
 <script src="js/actions.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/app.js"></script>
