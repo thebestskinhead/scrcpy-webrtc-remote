@@ -12,3 +12,5 @@
 # ===== 本地配置文件（含密钥/令牌，不入库）=====
 config/*.local.yaml
 config/*.secret.yaml
+
+.codebuddy/
