@@ -3,21 +3,22 @@
     scrcpy-webrtc-remote - 一键构建 & 打包脚本
 
 .DESCRIPTION
-    编译两个模块并打包到 build/ 目录:
+    编译模块并打包到 build/ 目录:
       build/signaling/  - 信令服务器 (云端, 含前端静态资源)
-      build/agent/      - 设备 agent   (电脑端, 含 scrcpy-server.jar)
+      build/agent/      - agent sidecar (电脑端, 含 scrcpy-server.jar)
+      build/test/       - 模拟平台 driver (agentdrv, 测试步骤工具)
     每个目录包含: exe (Windows + Linux) + 部署配置。
-    本脚本只构建 signaling 与 agent —— 与当前发布范围一致。
 
     运行时（部署目录内）:
       signaling.exe -c signaling.yaml     # 前端在 ./static (yaml 已生成好)
-      agent.exe -c agent.yaml             # jar 在同目录, yaml 已生成好
+      agentd.exe --grpc-port 17890        # sidecar，配置由平台经 gRPC 注入
+      # 验证: agentdrv.exe -c agent.yaml --grpc 127.0.0.1:17890 --agentd agentd.exe
 
 .PARAMETER Clean
     编译前清理 Go 缓存
 
 .PARAMETER SkipAgent
-    跳过 agent 模块
+    跳过 agentd (sidecar) 模块
 
 .PARAMETER SkipSignal
     跳过 signaling 模块
@@ -38,7 +39,7 @@ Set-Location $root
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " scrcpy-webrtc-remote - Build Pipeline" -ForegroundColor Cyan
-Write-Host " (signaling + agent only)" -ForegroundColor Cyan
+Write-Host " (signaling + agentd sidecar + agentdrv)" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -69,7 +70,7 @@ if ($Clean) {
     go clean -cache
 }
 
-# ---- 2. Build (signaling + agent) ----
+# ---- 2. Build ----
 Write-Host ""
 Write-Host "[2/5] Building modules..." -ForegroundColor Yellow
 
@@ -107,12 +108,12 @@ if (-not $SkipSignal) {
     }
 }
 if (-not $SkipAgent) {
-    Build-Module "agent" "./cmd/agent/" "agent.exe"
+    Build-Module "agent" "./cmd/agentd/" "agentd.exe"
     if (-not $WindowsOnly) {
-        Write-Host "  -> agent (linux) ... " -NoNewline
+        Write-Host "  -> agentd (linux) ... " -NoNewline
         $env:GOOS = "linux"
-        $outPath = Join-Path $root "build\agent\agent_linux"
-        go build -o $outPath "./cmd/agent/" 2>&1 | Out-Null
+        $outPath = Join-Path $root "build\agent\agentd_linux"
+        go build -o $outPath "./cmd/agentd/" 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
             $size = "{0:N1} MB" -f ((Get-Item $outPath).Length / 1MB)
             Write-Host "OK ($size)" -ForegroundColor Green
@@ -121,6 +122,8 @@ if (-not $SkipAgent) {
         }
         $env:GOOS = "windows"
     }
+    # 测试工具：模拟平台 driver（目标2，属 test/）
+    Build-Module "test" "./test/agentdrv/" "agentdrv.exe"
 }
 
 # ---- 3. Copy config, static & runtime deps ----
@@ -153,17 +156,17 @@ webrtc:
     }
 }
 
-# --- agent: 复制配置 + scrcpy-server.jar ---
+# --- agentd: 复制 scrcpy-server.jar + agent.yaml（agentdrv 注入用，可选） ---
 if (-not $SkipAgent) {
     $agDir = Join-Path $root "build\agent"
     Copy-Item "config/agent.yaml" (Join-Path $agDir "agent.yaml") -Force
-    Write-Host "  -> build/agent/agent.yaml (config)"
+    Write-Host "  -> build/agent/agent.yaml (agentdrv 注入用)"
 
     if (Test-Path "scrcpy-server.jar") {
         Copy-Item "scrcpy-server.jar" (Join-Path $agDir "scrcpy-server.jar") -Force
         Write-Host "  -> build/agent/scrcpy-server.jar"
     } else {
-        Write-Host "  ! 缺少 scrcpy-server.jar（agent 运行时需要）" -ForegroundColor Yellow
+        Write-Host "  ! 缺少 scrcpy-server.jar（agentd 运行时需要）" -ForegroundColor Yellow
     }
 }
 
@@ -191,5 +194,6 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Cloud -> copy build/signaling/ to your cloud server, run:"
 Write-Host "           signaling.exe -c signaling.yaml   (listen 0.0.0.0:8080, frontend at /app/)"
 Write-Host "  PC    -> copy build/agent/ to your PC (with ADB), run:"
-Write-Host "           agent.exe -c agent.yaml           (connect to signaling_url)"
+Write-Host "           agentd.exe --grpc-port 17890      (sidecar; 配置由平台经 gRPC 注入)"
+Write-Host "           验证: agentdrv.exe -c agent.yaml --grpc 127.0.0.1:17890 --agentd agentd.exe"
 Write-Host "========================================" -ForegroundColor Cyan

@@ -1,0 +1,248 @@
+// agent.proto - Agent 平台接入 gRPC 契约 v1.1
+// 事实源：docs/GRPC-API.md（gRPC 契约，含 §11 测试与验证策略）
+// 生成方式：scripts/gen-proto.ps1（Go → api/gen，Python → test/py）
+syntax = "proto3";
+
+package agentapi.v1;
+
+option go_package = "scrcpy-webrtc-remote/api/gen;agentapi";
+
+// ============================================================
+// Service：平台（Python/Go/Java/TS） → Agent（sidecar）
+// ============================================================
+service AgentService {
+  // 初始化：注入全局配置（仅 UNINITIALIZED 状态合法，重复调用 → ERR_ALREADY_INIT）
+  rpc Init(InitRequest) returns (InitResponse);
+  // 启动：Agent 就绪（等待 PrepareDevice / 信令连接）。幂等。
+  rpc Start(Empty) returns (CommonResponse);
+  // 优雅停止：回收所有设备与会话，释放资源（进程不退出）。幂等，状态回 UNINITIALIZED。
+  rpc Stop(Empty) returns (CommonResponse);
+  // 全局配置热更新（全量替换；不中断现有会话，新准备设备生效）
+  rpc ReloadConfig(ReloadConfigRequest) returns (CommonResponse);
+  // 设备管理：用户连接准备阶段注入设备配置（已存在 = 平滑更新）
+  rpc PrepareDevice(PrepareDeviceRequest) returns (CommonResponse);
+  // 设备管理：平台回收设备，断开其信令连接并从设备列表移除
+  rpc ReleaseDevice(ReleaseDeviceRequest) returns (CommonResponse);
+  // 强制清除设备内存配置（先断开，原子清除；设备保留在 ListDevices，configured=false）
+  rpc ResetDevice(ResetDeviceRequest) returns (CommonResponse);
+  // 查询本机所有设备状态（busy / idle / configured / signaling_connected）
+  rpc ListDevices(Empty) returns (ListDevicesResponse);
+  // 会话干预（绝对管理权）：强制关闭会话，浏览器收到 preempted
+  rpc ForceCloseSession(ForceCloseSessionRequest) returns (CommonResponse);
+  // 画质档位强制设定（无会话时仅持久化，后续会话继承）
+  rpc SetQuality(SetQualityRequest) returns (CommonResponse);
+  // 平台代发控制指令（fire-and-forget）
+  rpc SendControl(SendControlRequest) returns (CommonResponse);
+  // 探活
+  rpc Health(Empty) returns (HealthResponse);
+  // Agent → 平台：事件流（长连接，fan-out 广播，断线不重放）
+  rpc StreamEvents(Empty) returns (stream AgentEvent);
+}
+
+// ============================================================
+// Messages
+// ============================================================
+
+message Empty {}
+
+message CommonResponse {
+  bool ok = 1;
+  string error_code = 2;   // 见 docs/PLATFORM-API.md §7
+  string message = 3;
+}
+
+message InitRequest {
+  // 保留字段：实际监听端口在进程启动时由 --grpc-port / AGENT_GRPC_PORT 指定，
+  // 此处传 0 或省略；InitResponse.actual_port 恒等于进程启动端口。
+  int32 grpc_listen_port = 1;
+  GlobalConfig global_config = 2;   // 必填；缺省 → ERR_INVALID_ARG
+}
+
+message InitResponse {
+  bool ok = 1;
+  string error_code = 2;
+  string message = 3;
+  int32 actual_port = 4;
+}
+
+message ReloadConfigRequest {
+  GlobalConfig global_config = 1;   // 必填；缺省 → ERR_INVALID_ARG
+}
+
+message PrepareDeviceRequest {
+  string instance_id = 1;      // 必填
+  string device_serial = 2;    // 必填
+  DeviceConfig device_config = 3;  // 可选：显式字段覆盖全局
+  ConnectParams connect_params = 4; // 可选：信令连接参数覆盖
+}
+
+message ReleaseDeviceRequest {
+  string device_serial = 1;
+  string reason = 2;
+}
+
+message ResetDeviceRequest {
+  string device_serial = 1;
+  string reason = 2;
+}
+
+message ForceCloseSessionRequest {
+  string session_id = 1;   // 必填
+  string reason = 2;
+}
+
+message SetQualityRequest {
+  string device_serial = 1;
+  string level = 2;        // clear / hd / original
+}
+
+message SendControlRequest {
+  string device_serial = 1;
+  ControlMessage control = 2;   // 必填
+}
+
+message ControlMessage {
+  string type = 1;              // inject_touch / inject_keycode / set_clipboard ...
+  map<string, string> data = 2; // 数字字段以字符串传递
+}
+
+message HealthResponse {
+  bool ok = 1;
+  string version = 2;
+  int32 device_count = 3;
+  int32 active_sessions = 4;
+  int64 uptime_seconds = 5;
+  string last_error = 6;
+}
+
+message GlobalConfig {
+  string signaling_url = 1;
+  string service_id = 2;
+  repeated string stun_servers = 3;
+  TurnServer turn_server = 4;
+  ScrcpyConfig scrcpy = 5;
+  string adb_path = 6;
+  int32 qos_interval_ms = 7;   // QoSReport 采样周期（毫秒），默认 2000
+}
+
+message TurnServer {
+  repeated string urls = 1;
+  string username = 2;
+  string credential = 3;
+}
+
+message ScrcpyConfig {
+  string server_version = 1;
+  string jar_path = 2;
+  int32 port_pool_start = 3;
+  int32 port_pool_size = 4;
+  int32 max_size = 5;
+  int32 video_bit_rate = 6;
+  int32 min_video_bit_rate = 7;
+  int32 clear_bitrate = 8;
+  int32 hd_bitrate = 9;
+  int32 warm_keep_seconds = 10;
+  int32 audio_bit_rate = 11;
+  string video_codec = 12;
+  string audio_codec = 13;
+  string audio_encoder = 14;
+  bool audio_enabled = 15;
+  bool power_on = 16;
+  bool stay_awake = 17;
+  int32 video_keyframe_interval = 18;
+  int32 video_max_fps = 19;
+  bool fec_disabled = 20;
+}
+
+message DeviceConfig {
+  optional int32 max_size = 1;
+  optional int32 video_bit_rate = 2;
+  optional int32 min_video_bit_rate = 3;
+  optional int32 clear_bitrate = 4;
+  optional int32 hd_bitrate = 5;
+  optional int32 video_keyframe_interval = 6;
+  optional int32 video_max_fps = 7;
+  optional bool audio_enabled = 8;
+  optional int32 warm_keep_seconds = 9;
+}
+
+message ConnectParams {
+  string service_id = 1;        // 非空则覆盖全局 ServiceID
+  map<string, string> ws_headers = 2;      // 附加 WS 握手头
+  map<string, string> register_fields = 3; // 注册消息附加字段
+  string ws_path = 4;           // 覆盖默认 /ws/agent/<service>
+}
+
+message AgentEvent {
+  string device_serial = 1;
+  string instance_id = 2;
+  string session_id = 3;
+  int64 timestamp_ms = 4;
+  oneof event {
+    DeviceStatusChanged device_status = 10;
+    SessionStarted session_started = 11;
+    SessionStopped session_stopped = 12;
+    StreamDead stream_dead = 13;
+    QoSReport qos = 14;
+    AgentError agent_error = 15;
+    DeviceReleased device_released = 16;  // ReleaseDevice 回收
+    DeviceReset device_reset = 17;        // ResetDevice 清除配置
+  }
+}
+
+message DeviceReleased {
+  string reason = 1;   // ReleaseDevice.reason（透传）
+}
+
+message DeviceReset {
+  string reason = 1;   // ResetDevice.reason（透传）
+}
+
+message DeviceStatusChanged {
+  bool busy = 1;
+}
+
+message SessionStarted {
+  string session_id = 1;
+}
+
+message SessionStopped {
+  string session_id = 1;
+  string reason = 2;   // user_unbound / forced / stream_dead / agent_stop ...
+}
+
+message StreamDead {
+  string session_id = 1;
+}
+
+message QoSReport {
+  string session_id = 1;
+  double loss_rate = 2;
+  double rtt_ms = 3;
+  int32 bitrate = 4;
+  double fps = 5;
+  int32 resolution_x = 6;
+  int32 resolution_y = 7;
+}
+
+message AgentError {
+  string code = 1;      // ERR_SIGNALING_DISCONNECTED / ERR_ACQUIRE_FAILED / ERR_INTERNAL ...
+  string message = 2;
+}
+
+message DeviceStatus {
+  string instance_id = 1;
+  string device_serial = 2;
+  bool busy = 3;                 // 是否有活动 WebRTC 会话
+  string current_session_id = 4; // busy 时的会话 ID
+  int32 connected_seconds = 5;   // 信令连接时长
+  bool signaling_connected = 6;  // 信令连接是否存活
+  bool configured = 7;           // 是否已有 per-device 配置（ResetDevice 后为 false）
+}
+
+message ListDevicesResponse {
+  bool ok = 1;
+  string error_code = 2;
+  string message = 3;
+  repeated DeviceStatus devices = 4;
+}

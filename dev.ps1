@@ -1,13 +1,14 @@
 ﻿<#
 .SYNOPSIS
-    Scrcpy WebRTC Remote - 开发调试脚本（go run 模式: signaling + agent）
-
+    Scrcpy WebRTC Remote - 开发调试脚本（go run 模式: signaling + agentd + agentdrv）
+    
 .DESCRIPTION
-    面向本仓库 agent + signaling 部署形态的日常调试工具。所有组件都用
+    面向本仓库 signaling + agentd(sidecar) 部署形态的日常调试工具。所有组件都用
     `go run` 直接运行源码，不预编译任何二进制：
 
-      start   以 go run 启动 signaling + agent（自动 adb connect 模拟器，日志落盘）
-      stop    按 PID 文件停止两个 go run 进程树
+      start   以 go run 启动 signaling + agentd，并启动 agentdrv（模拟平台 driver，
+              读 agent.yaml → Init/Start/PrepareDevice 驱动 sidecar；自动 adb connect，日志落盘）
+      stop    按 PID 文件停止 go run 进程树
       status  检查进程/健康接口/agent 注册/adb 设备/端口池占用
       monitor 循环监控: 健康、agent 注册、端口池、日志关键告警
       all     start + status
@@ -60,6 +61,7 @@ param(
     [string]$ServiceId = 'demo-service',
     [string]$InstanceId = 'device-1',
     [int]$WebPort = 8080,
+    [int]$GrpcPort = 17890,
     [string]$LogDir = '',
     [int]$DurationSec = 0,
     [switch]$AudioEnabled
@@ -81,9 +83,11 @@ if ([string]::IsNullOrWhiteSpace($DeviceSerial)) { $DeviceSerial = $AdbHost }
 
 $script:cfgDir        = Join-Path $logDir 'config'
 $script:signalingPid  = Join-Path $logDir 'signaling.pid'
-$script:agentPid      = Join-Path $logDir 'agent.pid'
+$script:agentdPid     = Join-Path $logDir 'agentd.pid'
+$script:drvPid        = Join-Path $logDir 'agentdrv.pid'
 $script:signalingLog  = Join-Path $logDir 'signaling.log'
-$script:agentLog      = Join-Path $logDir 'agent.log'
+$script:agentdLog     = Join-Path $logDir 'agentd.log'
+$script:drvLog        = Join-Path $logDir 'agentdrv.log'
 $script:wsCfg         = Join-Path $cfgDir 'signaling.yaml'
 $script:agCfg         = Join-Path $cfgDir 'agent.yaml'
 $script:baseUrl       = "http://127.0.0.1:$WebPort"
@@ -214,7 +218,8 @@ function Test-PortFree([int]$port) {
 function Start-GoRunProcess {
     param(
         [string]$Package,          # e.g. ./cmd/signaling
-        [string]$ConfigFile,       # -c 参数
+        [string]$ConfigFile,       # -c 参数（可为空，改用 -ExtraArgs）
+        [string[]]$ExtraArgs = @(),
         [string]$LogFile,
         [string]$PidFile
     )
@@ -222,7 +227,10 @@ function Start-GoRunProcess {
     Ensure-Dir (Split-Path -Parent $PidFile)
     # cmd /c 包装: stdout+stderr 重定向到同一日志（go run 的编译输出也一并落盘）；
     # 记录的是 cmd 包装进程 PID，stop 时用 taskkill /T 连 go run 及其子进程一起杀。
-    $argStr = (@('run', $Package, '-c', "`"$ConfigFile`"") -join ' ')
+    $argsArr = @('run', $Package)
+    if ($ConfigFile) { $argsArr += '-c'; $argsArr += "`"$ConfigFile`"" }
+    $argsArr += $ExtraArgs
+    $argStr = ($argsArr -join ' ')
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = 'cmd.exe'
     $psi.Arguments = "/c `"go $argStr > `"$LogFile`" 2>&1`""
@@ -276,7 +284,7 @@ function Stop-StrayProcesses {
 # start
 # ============================================================
 function Invoke-Start {
-    Step "Start (go run: signaling :$WebPort + agent $DeviceSerial)"
+    Step "Start (go run: signaling :$WebPort + agentd :$GrpcPort + agentdrv)"
 
     Ensure-Go
     $adbPath = Resolve-Adb
@@ -289,6 +297,10 @@ function Invoke-Start {
     if (-not (Test-PortFree $WebPort)) {
         $owner = (Get-NetTCPConnection -State Listen -LocalPort $WebPort -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
         throw "port $WebPort 已被占用 (PID $owner)。请先停止占用进程或改 -WebPort"
+    }
+    if (-not (Test-PortFree $GrpcPort)) {
+        $owner = (Get-NetTCPConnection -State Listen -LocalPort $GrpcPort -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+        throw "port $GrpcPort 已被占用 (PID $owner)。请先停止占用进程或改 -GrpcPort"
     }
     Ensure-Dir $logDir
 
@@ -311,28 +323,39 @@ function Invoke-Start {
     Start-Sleep -Seconds 2
     if (-not (Test-PortFree $WebPort)) { Ok "signaling listening on :$WebPort" } else { Warn 'signaling 可能未监听（看日志）' }
 
-    # 启动 agent (go run) —— PATH 前置 adb 目录，agent 用 "adb" 命令
-    Info "go run ./cmd/agent -> $agentLog (PATH+$adbDir)"
+    # 启动 agentd (sidecar, go run) —— PATH 前置 adb 目录，供内部 adb 使用
+    Info "go run ./cmd/agentd --grpc-port $GrpcPort -> $agentdLog (PATH+$adbDir)"
     $oldPath = $env:Path
     try {
         $env:Path = "$adbDir;$env:Path"
-        Start-GoRunProcess -Package './cmd/agent' -ConfigFile $agCfg -LogFile $agentLog -PidFile $agentPid | Out-Null
+        Start-GoRunProcess -Package './cmd/agentd' -ConfigFile '' -ExtraArgs @("--grpc-port", $GrpcPort) -LogFile $agentdLog -PidFile $agentdPid | Out-Null
     } finally {
         $env:Path = $oldPath
     }
+
+    # 等待 agentd gRPC 端口就绪
+    $deadline = (Get-Date).AddSeconds(120)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        if (-not (Test-PortFree $GrpcPort)) { Ok "agentd gRPC listening on :$GrpcPort"; break }
+    }
+
+    # 启动 agentdrv（模拟平台 driver：读 agent.yaml → Init/Start/PrepareDevice）
+    Info "go run ./test/agentdrv -c agent.yaml --grpc 127.0.0.1:$GrpcPort -> $drvLog"
+    Start-GoRunProcess -Package './test/agentdrv' -ConfigFile $agCfg -ExtraArgs @('--grpc', "127.0.0.1:$GrpcPort", '--events') -LogFile $drvLog -PidFile $drvPid | Out-Null
 
     # 等待 agent 注册（首启含编译，给足时间）
     $deadline = (Get-Date).AddSeconds(120)
     $registered = $false
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 500
-        if (Test-Path $agentLog) {
-            $tail = Get-Content $agentLog -Tail 300 -ErrorAction SilentlyContinue | Out-String
-            if ($tail -match 'agent instance connected|agent registered|received ICE servers') { $registered = $true; break }
+        if (Test-Path $drvLog) {
+            $tail = Get-Content $drvLog -Tail 300 -ErrorAction SilentlyContinue | Out-String
+            if ($tail -match 'device prepared') { $registered = $true; break }
         }
         if (-not (Test-Path $signalingPid)) { break }
     }
-    if ($registered) { Ok 'agent registered at signaling' } else { Warn 'agent 未在 120s 内注册，检查 agent.log' }
+    if ($registered) { Ok 'agentdrv prepared devices (agent registered at signaling)' } else { Warn 'agent 未在 120s 内注册，检查 agentdrv.log / agentd.log' }
 
     Ok "URL: $baseUrl  (service=$ServiceId, device=$InstanceId)"
 }
@@ -342,7 +365,8 @@ function Invoke-Start {
 # ============================================================
 function Invoke-Stop {
     Step 'Stop'
-    Stop-ByPidFile $agentPid 'agent'
+    Stop-ByPidFile $drvPid 'agentdrv'
+    Stop-ByPidFile $agentdPid 'agentd'
     Stop-ByPidFile $signalingPid 'signaling'
     Stop-StrayProcesses
 }
@@ -351,7 +375,8 @@ function Invoke-Status {
     Step "Status (base $baseUrl)"
     foreach ($pair in @(
         @{ n = 'signaling'; pf = $signalingPid },
-        @{ n = 'agent';     pf = $agentPid }
+        @{ n = 'agentd';    pf = $agentdPid },
+        @{ n = 'agentdrv';  pf = $drvPid }
     )) {
         $running = $false
         if (Test-Path $pair.pf) {
@@ -391,7 +416,7 @@ function Invoke-Status {
 function Invoke-Monitor {
     Step "Monitor (Ctrl+C 退出; 每 5s 一轮)"
     $stopAt = if ($DurationSec -gt 0) { (Get-Date).AddSeconds($DurationSec) } else { $null }
-    $lastAgentSize = 0
+    $lastDrvSize = 0
     $lastSigSize = 0
 
     while ($true) {
@@ -417,7 +442,7 @@ function Invoke-Monitor {
         if ($pool) { Write-Host "  portpool: $($pool -join ',')" }
 
         foreach ($pair in @(
-            @{ n = 'agent';     f = $agentLog;     last = [ref]$lastAgentSize },
+            @{ n = 'agentdrv';  f = $drvLog;       last = [ref]$lastDrvSize },
             @{ n = 'signaling'; f = $signalingLog; last = [ref]$lastSigSize }
         )) {
             if (-not (Test-Path $pair.f)) { continue }

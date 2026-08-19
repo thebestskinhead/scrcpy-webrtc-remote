@@ -21,7 +21,11 @@
 一条完整的链路只有两个 Go 进程：
 
 - **signaling**（`cmd/signaling`）—— 信令服务器：维护 agent 注册表、转发浏览器 ⇄ agent 的 SDP/ICE 消息、下发 ICE 服务器、提供 REST 接口并托管前端页面。
-- **agent**（`cmd/agent`）—— 设备侧网关：通过 ADB 拉起 scrcpy server，把设备的 H.264/Opus 流经 WebRTC 推给浏览器，并把浏览器的触控/按键/剪贴板指令注入回设备。
+- **agentd**（`cmd/agentd`）—— agent sidecar：以独立进程（sidecar）形态运行，本机监听 gRPC（`127.0.0.1:17890`）；平台（或测试用 `test/agentdrv`）经 gRPC 注入配置后，通过 ADB 拉起 scrcpy server，把设备的 H.264/Opus 流经 WebRTC 推给浏览器，并把浏览器的触控/按键/剪贴板指令注入回设备。
+
+> 配置注入：sidecar 不读本地 YAML。平台经 gRPC `Init`/`PrepareDevice` 动态注入全局与设备配置；
+> `test/agentdrv`（目标2，模拟平台 driver）可读 `config/agent.yaml` 并按原逻辑把配置传给 sidecar，
+> 用于浏览器端人工验证 sidecar 真实可用（见 `test/README.md`）。
 
 浏览器端是**纯静态前端**（`signaling/static/app`），无需构建、无需 SDK，打开即用。
 
@@ -96,17 +100,17 @@
 所有组件用 `go run` 直接运行源码，不预编译：
 
 ```powershell
-# 一键：启动 signaling + agent（go run）→ 状态检查
+# 一键：启动 signaling + agentd，并用 agentdrv 驱动 sidecar（go run）→ 状态检查
 .\dev.ps1 -Action all
 
 # 或分步：
-.\dev.ps1 -Action start    # go run 启动 signaling + agent，自动 adb connect
+.\dev.ps1 -Action start    # go run 启动 signaling + agentd + agentdrv（自动 adb connect）
 .\dev.ps1 -Action status   # 进程 / 健康 / agent 注册 / 端口池
-.\dev.ps1 -Action stop     # 停止两个 go run 进程树
+.\dev.ps1 -Action stop     # 停止 go run 进程树
 .\dev.ps1 -Action monitor  # 循环监控日志与告警
 ```
 
-常用参数：`-AdbPath`（adb 路径，默认自动探测）、`-AdbHost`（默认 `127.0.0.1:16384` MuMu）、`-ServiceId / -InstanceId`、`-WebPort`、`-AudioEnabled`（模拟器无 Opus 编码器时**不要**开）。
+常用参数：`-AdbPath`（adb 路径，默认自动探测）、`-AdbHost`（默认 `127.0.0.1:16384` MuMu）、`-ServiceId / -InstanceId`、`-WebPort`、`-GrpcPort`（默认 17890）、`-AudioEnabled`（模拟器无 Opus 编码器时**不要**开）。
 
 启动成功后浏览器打开：
 
@@ -114,14 +118,17 @@
 http://127.0.0.1:8080/app/?s=demo-service&d=device-1
 ```
 
-### 方式二：手动 go run
+### 方式二：手动启动（signaling + agentd + agentdrv）
 
 ```bash
 # 终端 1：信令服务器
 go run ./cmd/signaling -c config/signaling.yaml
 
-# 终端 2：设备 agent
-go run ./cmd/agent -c config/agent.yaml
+# 终端 2：agent sidecar（本地 gRPC 监听 127.0.0.1:17890）
+go run ./cmd/agentd --grpc-port 17890
+
+# 终端 3：模拟平台 driver（读 config/agent.yaml → Init/Start/PrepareDevice 驱动 sidecar）
+go run ./test/agentdrv -c config/agent.yaml --grpc 127.0.0.1:17890 --events
 ```
 
 ---
@@ -179,21 +186,34 @@ DataChannel（`control`）内为 JSON 控制指令：`inject_touch` / `inject_sc
 
 ```
 ├── dev.ps1                 # 开发调试脚本（go run，不预编译）
+├── build.ps1               # 构建 & 打包脚本（signaling + agentd + agentdrv）
 ├── config/
 │   ├── signaling.yaml      # 信令服务器配置
-│   └── agent.yaml          # agent 配置
+│   └── agent.yaml          # agent 配置（供 test/agentdrv 注入 sidecar）
 ├── cmd/
 │   ├── signaling/          # 信令服务器入口
-│   └── agent/              # 设备 agent 入口
+│   └── agentd/             # agent sidecar 入口（本机 gRPC 127.0.0.1:17890）
 ├── agent/                  # agent 实现
+│   ├── host/               # sidecar 生命周期编排 + gRPC server（13 RPC + 事件流）
+│   ├── configstore.go      # 平台注入配置的内存存储（全局 + 每设备覆盖）
+│   ├── devicemanager.go    # 设备管理（Prepare/Release/Reset/List，持锁原子）
+│   ├── hooks.go            # PlatformHooks 事件回调接口
 │   └── internal/
 │       ├── adb/            # ADB CLI 封装（push / forward / shell）
 │       ├── gateway/        # scrcpy 会话网关（协议解析、控制消息、PTS 归一化）
 │       ├── portpool/       # ADB forward 端口池
 │       └── webrtc/         # pion PeerConnection（NACK / RED FEC / PLI）
+├── api/
+│   ├── agent.proto         # gRPC 契约（唯一事实源）
+│   └── gen/                # protoc 生成的 Go 代码
+├── test/
+│   ├── testcases.md        # 用例契约（权威）
+│   ├── runner.py           # 目标1：自动化用例加载器（Python gRPC 客户端）
+│   ├── agentdrv/           # 目标2：模拟平台 driver（读 agent.yaml → gRPC 驱动 sidecar）
+│   └── py/                 # protoc 生成的 Python 代码
 ├── pkg/
 │   ├── common/             # 共享 WebSocket 消息类型
-│   ├── config/             # YAML 配置加载
+│   ├── config/             # YAML 配置加载 / DeviceConfig 合并 / proto 互转
 │   ├── logger/             # slog 日志
 │   ├── signaling/          # 信令引擎（纯 WS 逻辑，不依赖 HTTP）
 │   └── types/              # 媒体 / 控制共享类型
