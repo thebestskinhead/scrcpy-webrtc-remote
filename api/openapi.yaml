@@ -1,0 +1,353 @@
+openapi: 3.0.3
+info:
+  title: Astra HTTP Management API
+  version: 0.1.0
+  description: Management credentials are server-side secrets. Do not expose them to browser SDKs. Events are best-effort; reconcile with device queries after reconnect.
+servers:
+  - url: http://127.0.0.1:17890
+security:
+  - managementBearer: []
+paths:
+  /v1/health:
+    get:
+      operationId: health
+      responses:
+        '200':
+          description: Process status; ok is false before initialization.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: {type: boolean}
+                  version: {type: string}
+                  device_count: {type: integer}
+                  active_sessions: {type: integer}
+                  uptime_seconds: {type: integer, format: int64}
+                  last_error: {type: string}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/init:
+    post:
+      operationId: init
+      requestBody: {$ref: '#/components/requestBodies/GlobalConfig'}
+      responses:
+        '200':
+          description: Initialized
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/Response'}
+                  - type: object
+                    properties:
+                      actual_port: {type: integer}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/start:
+    post:
+      operationId: start
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/stop:
+    post:
+      operationId: stop
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/config:
+    put:
+      operationId: reloadConfig
+      description: Full replacement. Existing sessions are not interrupted. New sessions receive the merged configuration.
+      requestBody: {$ref: '#/components/requestBodies/GlobalConfig'}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/devices:
+    get:
+      operationId: listDevices
+      responses:
+        '200':
+          description: Stable device snapshot sorted by serial
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/Response'}
+                  - type: object
+                    properties:
+                      devices:
+                        type: array
+                        items: {$ref: '#/components/schemas/Device'}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: prepareDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [device_serial, instance_id]
+              properties:
+                device_serial: {type: string, minLength: 1}
+                instance_id: {type: string, minLength: 1}
+                device_config: {$ref: '#/components/schemas/DeviceConfig'}
+                connect_params:
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    service_id: {type: string}
+                    ws_path: {type: string}
+                    ws_headers: {type: object, additionalProperties: {type: string}}
+                    register_fields: {type: object, additionalProperties: {type: string}}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/devices/{serial}/release:
+    parameters: [{$ref: '#/components/parameters/Serial'}]
+    post:
+      operationId: releaseDevice
+      requestBody: {$ref: '#/components/requestBodies/Reason'}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/devices/{serial}/reset:
+    parameters: [{$ref: '#/components/parameters/Serial'}]
+    post:
+      operationId: resetDevice
+      description: Clear configuration and stop controller while retaining the device entry.
+      requestBody: {$ref: '#/components/requestBodies/Reason'}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/devices/{serial}/quality:
+    parameters: [{$ref: '#/components/parameters/Serial'}]
+    put:
+      operationId: setQuality
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [level]
+              properties:
+                level: {type: string}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/devices/{serial}/control:
+    parameters: [{$ref: '#/components/parameters/Serial'}]
+    post:
+      operationId: sendControl
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [type]
+              properties:
+                type: {type: string, minLength: 1}
+                data: {type: object, additionalProperties: true}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/sessions/{id}/close:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+    post:
+      operationId: forceCloseSession
+      requestBody: {$ref: '#/components/requestBodies/Reason'}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/sessions:
+    post:
+      operationId: createSession
+      description: Reserve a prepared device and issue a scoped short-lived secret. Existing reservations conflict unless preempt is explicitly true. The token is returned only when issued.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [device_serial]
+              properties:
+                device_serial: {type: string, minLength: 1}
+                ttl_seconds: {type: integer, minimum: 0, maximum: 86400, default: 300}
+                preempt: {type: boolean, default: false}
+      responses:
+        '200':
+          description: Scoped grant and secret
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - {$ref: '#/components/schemas/Response'}
+                  - type: object
+                    properties:
+                      token: {type: string}
+                      session:
+                        type: object
+                        properties:
+                          session_id: {type: string}
+                          device_serial: {type: string}
+                          service_id: {type: string}
+                          instance_id: {type: string}
+                          expires_at: {type: string, format: date-time}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/sessions/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string}
+    delete:
+      operationId: revokeSession
+      description: Idempotently revoke an authorization and close its active session if present.
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        default: {$ref: '#/components/responses/Error'}
+  /v1/events:
+    get:
+      operationId: streamEvents
+      description: Authenticated SSE using fetch streaming. No query-string credentials, replay, or Last-Event-ID support. Heartbeats every 15 seconds; slow clients may lose events and must query device state. Each data frame contains one Event JSON object.
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema: {type: string}
+        default: {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    managementBearer:
+      type: http
+      scheme: bearer
+  parameters:
+    Serial:
+      name: serial
+      in: path
+      required: true
+      schema: {type: string, minLength: 1}
+  requestBodies:
+    Reason:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              reason: {type: string}
+    GlobalConfig:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [global_config]
+            properties:
+              global_config: {$ref: '#/components/schemas/AgentConfig'}
+  responses:
+    Success:
+      description: Operation completed
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Response'}
+    Error:
+      description: '400 invalid input; 401 invalid credentials; 404 device/session missing; 409 lifecycle or ownership conflict; 413 body exceeds 1 MiB; 415 unsupported media type; 500 internal failure.'
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Response'}
+  schemas:
+    Response:
+      type: object
+      required: [ok, error_code]
+      properties:
+        ok: {type: boolean}
+        error_code: {type: string}
+        message: {type: string}
+    Device:
+      type: object
+      properties:
+        instance_id: {type: string}
+        device_serial: {type: string}
+        busy: {type: boolean}
+        current_session_id: {type: string}
+        connected_seconds: {type: integer}
+        signaling_connected: {type: boolean}
+        configured: {type: boolean}
+    DeviceConfig:
+      type: object
+      additionalProperties: false
+      description: Omitted or null properties inherit the global value; explicit zero and false override it.
+      properties:
+        max_size: {type: integer, nullable: true}
+        video_bit_rate: {type: integer, nullable: true}
+        min_video_bit_rate: {type: integer, nullable: true}
+        clear_bitrate: {type: integer, nullable: true}
+        hd_bitrate: {type: integer, nullable: true}
+        video_keyframe_interval: {type: integer, nullable: true}
+        video_max_fps: {type: integer, nullable: true}
+        audio_enabled: {type: boolean, nullable: true}
+        warm_keep_seconds: {type: integer, nullable: true}
+    AgentConfig:
+      type: object
+      additionalProperties: false
+      properties:
+        signaling_url: {type: string}
+        service_id: {type: string}
+        instance_id: {type: string}
+        device_serial: {type: string}
+        instances:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              instance_id: {type: string}
+              device_serial: {type: string}
+        stun_servers: {type: array, items: {type: string}}
+        turn_server:
+          type: object
+          additionalProperties: false
+          properties:
+            urls: {type: array, items: {type: string}}
+            username: {type: string}
+            credential: {type: string}
+        adb_path: {type: string}
+        qos_interval_ms: {type: integer}
+        scrcpy:
+          type: object
+          additionalProperties: false
+          properties:
+            server_version: {type: string}
+            jar_path: {type: string}
+            port_pool_start: {type: integer}
+            port_pool_size: {type: integer}
+            max_size: {type: integer}
+            video_bit_rate: {type: integer}
+            min_video_bit_rate: {type: integer}
+            clear_bitrate: {type: integer}
+            hd_bitrate: {type: integer}
+            warm_keep_seconds: {type: integer}
+            audio_bit_rate: {type: integer}
+            video_codec: {type: string}
+            audio_codec: {type: string}
+            audio_encoder: {type: string}
+            audio_enabled: {type: boolean}
+            power_on: {type: boolean}
+            stay_awake: {type: boolean}
+            video_keyframe_interval: {type: integer}
+            video_max_fps: {type: integer}
+            fec_disabled: {type: boolean}

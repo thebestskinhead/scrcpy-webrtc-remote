@@ -23,6 +23,13 @@ func New(path string) *Client {
 	return &Client{path: path}
 }
 
+func (c *Client) Path() string {
+	if c == nil {
+		return "adb"
+	}
+	return c.path
+}
+
 func (c *Client) args(serial string, extra ...string) []string {
 	a := []string{"-s", serial}
 	a = append(a, extra...)

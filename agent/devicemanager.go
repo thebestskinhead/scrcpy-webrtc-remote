@@ -11,13 +11,13 @@ import (
 
 // DeviceView 是 ListDevices 的可观察设备状态快照（grpc 层转 proto）。
 type DeviceView struct {
-	InstanceID         string
-	Serial             string
-	Busy               bool
-	CurrentSessionID   string
-	ConnectedSeconds   int32
-	SignalingConnected bool
-	Configured         bool
+	InstanceID         string `json:"instance_id"`
+	Serial             string `json:"device_serial"`
+	Busy               bool   `json:"busy"`
+	CurrentSessionID   string `json:"current_session_id"`
+	ConnectedSeconds   int32  `json:"connected_seconds"`
+	SignalingConnected bool   `json:"signaling_connected"`
+	Configured         bool   `json:"configured"`
 }
 
 // deviceEntry 表示一个已登记设备。configured=false（ResetDevice 后）表示
@@ -32,7 +32,10 @@ type deviceEntry struct {
 // DeviceManager 管理 serial → deviceEntry 映射，Prepare/Release/Reset 全程
 // 持锁保证原子性（杜绝 bound 重建竞态，见 PLATFORM-API.md §3.10）。
 type DeviceManager struct {
+	opMu    sync.Mutex
 	mu      sync.Mutex
+	closed  bool
+	run     func(*Controller)
 	devices map[string]*deviceEntry
 
 	store *ConfigStore
@@ -47,14 +50,27 @@ func NewDeviceManager(store *ConfigStore, pool *portpool.Pool, hooks PlatformHoo
 		store:   store,
 		pool:    pool,
 		hooks:   hooks,
+		run:     (*Controller).Run,
 	}
 }
 
 // Prepare registers (or smoothly updates) a device with per-device config.
 // 锁内完成配置覆盖与 Controller 创建，锁外启动信令连接 goroutine。
 func (dm *DeviceManager) Prepare(serial, instanceID string, devCfg *config.DeviceConfig, cp ConnectParams) error {
+	dm.opMu.Lock()
+	defer dm.opMu.Unlock()
+	if dm.closed {
+		return fmt.Errorf("device manager stopped")
+	}
+	if serial == "" || instanceID == "" || dm.store.Global() == nil {
+		return fmt.Errorf("device, instance and global configuration are required")
+	}
 	dm.mu.Lock()
 	entry := dm.devices[serial]
+	if entry != nil && entry.ctrl != nil && entry.instanceID != instanceID {
+		dm.mu.Unlock()
+		return fmt.Errorf("release device before changing instance_id")
+	}
 	if entry == nil {
 		entry = &deviceEntry{serial: serial}
 		dm.devices[serial] = entry
@@ -69,7 +85,7 @@ func (dm *DeviceManager) Prepare(serial, instanceID string, devCfg *config.Devic
 		entry.ctrl = newController(dm.store, config.InstanceConfig{
 			InstanceID: instanceID, DeviceSerial: serial,
 		}, dm.pool, dm.hooks, cp)
-		go entry.ctrl.Run()
+		go dm.run(entry.ctrl)
 	} else {
 		entry.ctrl.SetConnectParams(cp)
 	}
@@ -88,6 +104,8 @@ func (dm *DeviceManager) Prepare(serial, instanceID string, devCfg *config.Devic
 // 注意：先取 entry.ctrl 引用再解锁（delete 之后 entry 仍可访问其字段），
 // 锁外调用 ctrl.Stop()，避免持锁期间 stop 回调死锁。
 func (dm *DeviceManager) Release(serial, reason string) error {
+	dm.opMu.Lock()
+	defer dm.opMu.Unlock()
 	dm.mu.Lock()
 	entry, ok := dm.devices[serial]
 	if !ok {
@@ -117,6 +135,8 @@ func (dm *DeviceManager) Release(serial, reason string) error {
 // 并发防护：锁内置 entry.ctrl=nil + 锁外 ctrl.Stop() 关闭信令 WS，
 // 使该 Controller 不再处理新 bound（旧会话被终止），无需额外"清除中"标志。
 func (dm *DeviceManager) Reset(serial, reason string) error {
+	dm.opMu.Lock()
+	defer dm.opMu.Unlock()
 	dm.mu.Lock()
 	entry, ok := dm.devices[serial]
 	if !ok {
@@ -189,6 +209,9 @@ func (dm *DeviceManager) GetBySessionID(sessionID string) *Controller {
 
 // StopAll tears down every device (used by Host.Stop).
 func (dm *DeviceManager) StopAll() {
+	dm.opMu.Lock()
+	defer dm.opMu.Unlock()
+	dm.closed = true
 	dm.mu.Lock()
 	ctrls := make([]*Controller, 0, len(dm.devices))
 	for _, e := range dm.devices {

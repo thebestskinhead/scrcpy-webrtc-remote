@@ -11,7 +11,7 @@
 
     运行时（部署目录内）:
       signaling.exe -c signaling.yaml     # 前端在 ./static (yaml 已生成好)
-      agentd.exe --grpc-port 17890        # sidecar，配置由平台经 gRPC 注入
+      agentd.exe --http-port 17890        # sidecar，配置由平台经 gRPC 注入
       # 验证: agentdrv.exe -c agent.yaml --grpc 127.0.0.1:17890 --agentd agentd.exe
 
 .PARAMETER Clean
@@ -194,6 +194,6 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Cloud -> copy build/signaling/ to your cloud server, run:"
 Write-Host "           signaling.exe -c signaling.yaml   (listen 0.0.0.0:8080, frontend at /app/)"
 Write-Host "  PC    -> copy build/agent/ to your PC (with ADB), run:"
-Write-Host "           agentd.exe --grpc-port 17890      (sidecar; 配置由平台经 gRPC 注入)"
+Write-Host "           agentd.exe --http-port 17890      (sidecar; 配置由平台经 gRPC 注入)"
 Write-Host "           验证: agentdrv.exe -c agent.yaml --grpc 127.0.0.1:17890 --agentd agentd.exe"
 Write-Host "========================================" -ForegroundColor Cyan

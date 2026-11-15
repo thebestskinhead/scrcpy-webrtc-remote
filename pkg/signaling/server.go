@@ -171,6 +171,29 @@ func (s *Server) HandleAgentWS(ws *websocket.Conn, serviceID string) {
 // demultiplexed in the single HandleAgentWS read loop and routed back by
 // relay_id, which avoids two goroutines competing to read the agent conn.
 func (s *Server) HandleRelayWS(ws *websocket.Conn, serviceID, instanceID string) {
+	s.handleRelayWS(ws, serviceID, instanceID, "", nil, time.Time{})
+}
+
+func (s *Server) HandleAuthorizedRelayWS(ws *websocket.Conn, serviceID, instanceID, sessionID string, revoked <-chan struct{}, expires time.Time) {
+	s.handleRelayWS(ws, serviceID, instanceID, sessionID, revoked, expires)
+}
+
+func (s *Server) handleRelayWS(ws *websocket.Conn, serviceID, instanceID, sessionID string, revoked <-chan struct{}, expires time.Time) {
+	done := make(chan struct{})
+	defer close(done)
+	if !expires.IsZero() {
+		go func() {
+			timer := time.NewTimer(time.Until(expires))
+			defer timer.Stop()
+			select {
+			case <-done:
+				return
+			case <-revoked:
+			case <-timer.C:
+			}
+			ws.Close()
+		}()
+	}
 	// registered relay_ids owned by this connection, for cleanup
 	owned := make(map[string]bool)
 	defer func() {
@@ -193,8 +216,26 @@ func (s *Server) HandleRelayWS(ws *websocket.Conn, serviceID, instanceID string)
 			continue
 		}
 
+		select {
+		case <-revoked:
+			return
+		default:
+		}
+		if !expires.IsZero() && !time.Now().Before(expires) {
+			return
+		}
+		if sessionID != "" {
+			if msg.RelayID != sessionID || getString(msg.Payload, "type") != "query_status" {
+				return
+			}
+			msg.SessionID = sessionID
+		}
 		// Register relay_id → this WS so the agent's response can route back
 		s.relaySessionMu.Lock()
+		if current := s.relaySessions[msg.RelayID]; current != nil && current != ws {
+			s.relaySessionMu.Unlock()
+			return
+		}
 		s.relaySessions[msg.RelayID] = ws
 		s.relaySessionMu.Unlock()
 		owned[msg.RelayID] = true
@@ -232,7 +273,19 @@ func getStringPtr(m map[string]any, key string) *string {
 // has already performed the HTTP upgrade and extracted service_id + instance_id.
 // This method starts background goroutines and returns immediately.
 func (s *Server) HandleBrowserWS(ws *websocket.Conn, serviceID, instanceID string) {
-	sessionID := uuid.New().String()
+	s.handleBrowserWS(ws, serviceID, instanceID, uuid.New().String(), nil, time.Time{})
+}
+
+// HandleAuthorizedBrowserWS binds a connection to an already validated grant.
+func (s *Server) HandleAuthorizedBrowserWS(ws *websocket.Conn, serviceID, instanceID, sessionID string, revoked <-chan struct{}, expires time.Time) {
+	s.handleBrowserWS(ws, serviceID, instanceID, sessionID, revoked, expires)
+}
+
+func (s *Server) handleBrowserWS(ws *websocket.Conn, serviceID, instanceID, sessionID string, revoked <-chan struct{}, expires time.Time) {
+	if sessionID == "" || (!expires.IsZero() && !time.Now().Before(expires)) {
+		ws.Close()
+		return
+	}
 
 	agent := s.agents.lookup(serviceID, instanceID)
 	if agent == nil {
@@ -242,6 +295,14 @@ func (s *Server) HandleBrowserWS(ws *websocket.Conn, serviceID, instanceID strin
 	}
 
 	s.browserSessionMu.Lock()
+	for _, existing := range s.browserSessions {
+		if existing.serviceID == serviceID && existing.instanceID == instanceID {
+			s.browserSessionMu.Unlock()
+			writeWS(ws, common.WsMsg{Type: common.TypeError, Message: "device busy"})
+			ws.Close()
+			return
+		}
+	}
 	s.browserSessions[ws] = &browserSession{
 		sessionID:  sessionID,
 		serviceID:  serviceID,
@@ -261,8 +322,23 @@ func (s *Server) HandleBrowserWS(ws *websocket.Conn, serviceID, instanceID strin
 		IceServers: s.buildICEServerEntries(),
 	})
 
+	done := make(chan struct{})
+	if !expires.IsZero() {
+		go func() {
+			timer := time.NewTimer(time.Until(expires))
+			defer timer.Stop()
+			select {
+			case <-done:
+				return
+			case <-revoked:
+			case <-timer.C:
+			}
+			ws.Close()
+		}()
+	}
 	// Browser → Agent: read from browser WS, forward to agent
 	go func() {
+		defer close(done)
 		defer func() {
 			// On browser disconnect, tell the CURRENT agent (it may have
 			// reconnected since this session was created)
@@ -282,6 +358,19 @@ func (s *Server) HandleBrowserWS(ws *websocket.Conn, serviceID, instanceID strin
 			if err := ws.ReadJSON(&msg); err != nil {
 				return
 			}
+			select {
+			case <-revoked:
+				return
+			default:
+			}
+			if !expires.IsZero() && !time.Now().Before(expires) {
+				return
+			}
+			switch msg.Type {
+			case common.TypeOffer, common.TypeIceCandidate:
+			default:
+				continue
+			}
 			msg.SessionID = sessionID
 			// Look up the agent per message: after an agent reconnect the
 			// old conn is dead and writes into it would silently vanish.
@@ -293,6 +382,9 @@ func (s *Server) HandleBrowserWS(ws *websocket.Conn, serviceID, instanceID strin
 			writeAgentWS(cur, msg)
 		}
 	}()
+	if !expires.IsZero() {
+		<-done
+	}
 }
 
 // Agents returns a snapshot of all registered agents. The platform
@@ -311,11 +403,21 @@ func (s *Server) Agents() []AgentInfo {
 	return result
 }
 
-// Close shuts down all agent connections.
+// Close shuts down agent, browser and relay connections.
 func (s *Server) Close() {
 	for _, a := range s.agents.all() {
 		a.Conn.Close()
 	}
+	s.browserSessionMu.Lock()
+	for ws := range s.browserSessions {
+		ws.Close()
+	}
+	s.browserSessionMu.Unlock()
+	s.relaySessionMu.Lock()
+	for _, ws := range s.relaySessions {
+		ws.Close()
+	}
+	s.relaySessionMu.Unlock()
 }
 
 // ---------------------------------------------------------------------------

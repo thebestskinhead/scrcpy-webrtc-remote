@@ -61,7 +61,7 @@ param(
     [string]$ServiceId = 'demo-service',
     [string]$InstanceId = 'device-1',
     [int]$WebPort = 8080,
-    [int]$GrpcPort = 17890,
+    [int]$HttpPort = 17890,
     [string]$LogDir = '',
     [int]$DurationSec = 0,
     [switch]$AudioEnabled
@@ -284,9 +284,10 @@ function Stop-StrayProcesses {
 # start
 # ============================================================
 function Invoke-Start {
-    Step "Start (go run: signaling :$WebPort + agentd :$GrpcPort + agentdrv)"
+    Step "Start (go run: signaling :$WebPort + agentd :$HttpPort + agentdrv)"
 
     Ensure-Go
+    if (-not $env:ASTRA_MANAGEMENT_TOKEN) { throw '请先设置 ASTRA_MANAGEMENT_TOKEN（仅服务端持有）' }
     $adbPath = Resolve-Adb
     $adbDir = Split-Path -Parent $adbPath
 
@@ -298,9 +299,9 @@ function Invoke-Start {
         $owner = (Get-NetTCPConnection -State Listen -LocalPort $WebPort -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
         throw "port $WebPort 已被占用 (PID $owner)。请先停止占用进程或改 -WebPort"
     }
-    if (-not (Test-PortFree $GrpcPort)) {
-        $owner = (Get-NetTCPConnection -State Listen -LocalPort $GrpcPort -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
-        throw "port $GrpcPort 已被占用 (PID $owner)。请先停止占用进程或改 -GrpcPort"
+    if (-not (Test-PortFree $HttpPort)) {
+        $owner = (Get-NetTCPConnection -State Listen -LocalPort $HttpPort -ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess
+        throw "port $HttpPort 已被占用 (PID $owner)。请先停止占用进程或改 -HttpPort"
     }
     Ensure-Dir $logDir
 
@@ -319,30 +320,30 @@ function Invoke-Start {
 
     # 启动 signaling (go run)
     Info "go run ./cmd/signaling -> $signalingLog"
-    Start-GoRunProcess -Package './cmd/signaling' -ConfigFile $wsCfg -LogFile $signalingLog -PidFile $signalingPid | Out-Null
+    Start-GoRunProcess -Package './cmd/signaling' -ConfigFile $wsCfg -ExtraArgs @('--management-url', "http://127.0.0.1:$HttpPort") -LogFile $signalingLog -PidFile $signalingPid | Out-Null
     Start-Sleep -Seconds 2
     if (-not (Test-PortFree $WebPort)) { Ok "signaling listening on :$WebPort" } else { Warn 'signaling 可能未监听（看日志）' }
 
     # 启动 agentd (sidecar, go run) —— PATH 前置 adb 目录，供内部 adb 使用
-    Info "go run ./cmd/agentd --grpc-port $GrpcPort -> $agentdLog (PATH+$adbDir)"
+    Info "go run ./cmd/agentd --http-port $HttpPort -> $agentdLog (PATH+$adbDir)"
     $oldPath = $env:Path
     try {
         $env:Path = "$adbDir;$env:Path"
-        Start-GoRunProcess -Package './cmd/agentd' -ConfigFile '' -ExtraArgs @("--grpc-port", $GrpcPort) -LogFile $agentdLog -PidFile $agentdPid | Out-Null
+        Start-GoRunProcess -Package './cmd/agentd' -ConfigFile '' -ExtraArgs @("--http-port", $HttpPort) -LogFile $agentdLog -PidFile $agentdPid | Out-Null
     } finally {
         $env:Path = $oldPath
     }
 
-    # 等待 agentd gRPC 端口就绪
+    # 等待 agentd HTTP 端口就绪
     $deadline = (Get-Date).AddSeconds(120)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Milliseconds 500
-        if (-not (Test-PortFree $GrpcPort)) { Ok "agentd gRPC listening on :$GrpcPort"; break }
+        if (-not (Test-PortFree $HttpPort)) { Ok "agentd HTTP listening on :$HttpPort"; break }
     }
 
     # 启动 agentdrv（模拟平台 driver：读 agent.yaml → Init/Start/PrepareDevice）
-    Info "go run ./test/agentdrv -c agent.yaml --grpc 127.0.0.1:$GrpcPort -> $drvLog"
-    Start-GoRunProcess -Package './test/agentdrv' -ConfigFile $agCfg -ExtraArgs @('--grpc', "127.0.0.1:$GrpcPort", '--events') -LogFile $drvLog -PidFile $drvPid | Out-Null
+    Info "go run ./test/agentdrv -c agent.yaml --http http://127.0.0.1:$HttpPort -> $drvLog"
+    Start-GoRunProcess -Package './test/agentdrv' -ConfigFile $agCfg -ExtraArgs @('--http', "http://127.0.0.1:$HttpPort", '--events') -LogFile $drvLog -PidFile $drvPid | Out-Null
 
     # 等待 agent 注册（首启含编译，给足时间）
     $deadline = (Get-Date).AddSeconds(120)

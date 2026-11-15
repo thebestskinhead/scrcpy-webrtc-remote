@@ -65,7 +65,7 @@
     // 事件接线
     // ================================================================
     _wireEvents() {
-      const E = CG.events;
+      const E = this.conn.events;
 
       // 技术步骤 → 旅程进度
       E.on('step', d => this._onStep(d));
@@ -258,22 +258,16 @@
       this.ui.setStageInfo(0, '正在连接云端设备…', '检测设备状态…');
 
       try {
-        const resp = await CG.relayQuery(svc, inst, { type: 'query_status' });
-        if (resp.payload && resp.payload.busy) {
-          const ok = await this.ui.showPreemptConfirm(svc, inst);
-          if (!ok) {
-            this.ui.showIdle({ svcId: svc, instId: inst, lastSession: this._lastSession });
-            return;
-          }
-          this.ui.setStageInfo(0, '正在接管设备…', '请稍候');
-          await CG.relayQuery(svc, inst, { type: 'preempt' });
-        }
+        const authorize = window.AstraAuthorizeSession;
+        const authorization = typeof authorize === 'function'
+          ? await authorize({ service_id: svc, instance_id: inst, preempt: false })
+          : window.AstraSessionAuthorization;
+        if (!authorization) throw new Error('请由平台后端签发会话授权后再连接');
+        this.ui.setStageInfo(0, '正在连接云端设备…', '预计需要几秒钟');
+        await this.conn.connect(svc, inst, authorization);
       } catch (e) {
-        CG.log('[APP] status check failed, connecting directly: ' + e.message);
+        this._showFriendlyError(e.message || '会话授权失败');
       }
-
-      this.ui.setStageInfo(0, '正在连接云端设备…', '预计需要几秒钟');
-      this.conn.connect(svc, inst);
     },
 
     // ================================================================
@@ -475,6 +469,7 @@
     // 收尾
     // ================================================================
     _cleanupSession() {
+      this.input.destroy();
       this._stopFrameCallback();
       this.stats.stop();
       const video = document.getElementById('remoteVideo');

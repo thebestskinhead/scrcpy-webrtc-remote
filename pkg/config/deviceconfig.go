@@ -4,15 +4,15 @@ package config
 // Pointer fields distinguish "explicitly set" from "inherit global".
 // 与 api/agent.proto DeviceConfig 字段一一对应（见 conv.go）。
 type DeviceConfig struct {
-	MaxSize              *int
-	VideoBitRate         *int
-	MinVideoBitRate      *int
-	ClearBitrate         *int
-	HDBitrate            *int
-	VideoKeyframeInterval *int
-	VideoMaxFPS          *int
-	AudioEnabled         *bool
-	WarmKeepSeconds      *int
+	MaxSize               *int  `json:"max_size,omitempty"`
+	VideoBitRate          *int  `json:"video_bit_rate,omitempty"`
+	MinVideoBitRate       *int  `json:"min_video_bit_rate,omitempty"`
+	ClearBitrate          *int  `json:"clear_bitrate,omitempty"`
+	HDBitrate             *int  `json:"hd_bitrate,omitempty"`
+	VideoKeyframeInterval *int  `json:"video_keyframe_interval,omitempty"`
+	VideoMaxFPS           *int  `json:"video_max_fps,omitempty"`
+	AudioEnabled          *bool `json:"audio_enabled,omitempty"`
+	WarmKeepSeconds       *int  `json:"warm_keep_seconds,omitempty"`
 }
 
 // MergeDeviceConfig returns a copy of base with every explicitly-set

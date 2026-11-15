@@ -22,10 +22,10 @@ type Client struct {
 // ConnectParams 覆盖设备信令连接参数（来自 PrepareDevice.connect_params）。
 // 未设置字段回退全局配置（service_id）或默认路径。
 type ConnectParams struct {
-	ServiceID      string            // 非空则覆盖全局 ServiceID
-	WSHeaders      map[string]string // 附加 WS 握手头
-	RegisterFields map[string]string // 注册消息附加字段（并入 register.Data）
-	WSPath         string            // 覆盖默认 /ws/agent/<service>
+	ServiceID      string            `json:"service_id,omitempty"`      // 非空则覆盖全局 ServiceID
+	WSHeaders      map[string]string `json:"ws_headers,omitempty"`      // 附加 WS 握手头
+	RegisterFields map[string]string `json:"register_fields,omitempty"` // 注册消息附加字段（并入 register.Data）
+	WSPath         string            `json:"ws_path,omitempty"`         // 覆盖默认 /ws/agent/<service>
 }
 
 // Connect dials the signaling server with default params (legacy entry).

@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	agentapi "scrcpy-webrtc-remote/api/gen"
 	"scrcpy-webrtc-remote/agent"
 	"scrcpy-webrtc-remote/pkg/config"
 	"scrcpy-webrtc-remote/pkg/logger"
+	"scrcpy-webrtc-remote/pkg/sessionauth"
 )
 
 // 生命周期状态机（PLATFORM-API.md §3.1 权威定义）：
@@ -28,7 +28,7 @@ const (
 // 平台以 ListDevices 补偿。
 type EventHub struct {
 	mu   sync.RWMutex
-	subs map[chan *agentapi.AgentEvent]struct{}
+	subs map[chan *Event]struct{}
 	q    int
 }
 
@@ -37,12 +37,12 @@ func NewEventHub(queueSize int) *EventHub {
 	if queueSize <= 0 {
 		queueSize = 64
 	}
-	return &EventHub{subs: make(map[chan *agentapi.AgentEvent]struct{}), q: queueSize}
+	return &EventHub{subs: make(map[chan *Event]struct{}), q: queueSize}
 }
 
 // Publish broadcasts an event to all subscribers (non-blocking; full queues
 // drop their own events only).
-func (h *EventHub) Publish(ev *agentapi.AgentEvent) {
+func (h *EventHub) Publish(ev *Event) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for ch := range h.subs {
@@ -56,16 +56,19 @@ func (h *EventHub) Publish(ev *agentapi.AgentEvent) {
 
 // Subscribe registers a subscriber. The returned cancel closes the channel
 // and unregisters it.
-func (h *EventHub) Subscribe() (chan *agentapi.AgentEvent, func()) {
-	ch := make(chan *agentapi.AgentEvent, h.q)
+func (h *EventHub) Subscribe() (chan *Event, func()) {
+	ch := make(chan *Event, h.q)
 	h.mu.Lock()
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
+	var once sync.Once
 	return ch, func() {
-		h.mu.Lock()
-		delete(h.subs, ch)
-		close(ch)
-		h.mu.Unlock()
+		once.Do(func() {
+			h.mu.Lock()
+			delete(h.subs, ch)
+			close(ch)
+			h.mu.Unlock()
+		})
 	}
 }
 
@@ -85,44 +88,41 @@ func newHookBridge(hub *EventHub, store *agent.ConfigStore, onError func(code, m
 }
 
 // newEvent 构造带公共字段（serial/instance/session/timestamp）的 AgentEvent。
-func (b *hookBridge) newEvent(serial, instanceID, sessionID string) *agentapi.AgentEvent {
-	return &agentapi.AgentEvent{
+func (b *hookBridge) newEvent(serial, instanceID, sessionID string) *Event {
+	return &Event{
 		DeviceSerial: serial,
-		InstanceId:   instanceID,
-		SessionId:    sessionID,
-		TimestampMs:  time.Now().UnixMilli(),
+		InstanceID:   instanceID,
+		SessionID:    sessionID,
+		TimestampMS:  time.Now().UnixMilli(),
 	}
 }
 
 func (b *hookBridge) OnDeviceStatus(serial, instanceID string, busy bool) {
 	ev := b.newEvent(serial, instanceID, "")
-	ev.Event = &agentapi.AgentEvent_DeviceStatus{
-		DeviceStatus: &agentapi.DeviceStatusChanged{Busy: busy},
-	}
+	ev.Type = "device_status"
+	ev.Data.Busy = busy
 	b.hub.Publish(ev)
 }
 
 func (b *hookBridge) OnSessionStarted(serial, instanceID, sessionID string) {
 	ev := b.newEvent(serial, instanceID, sessionID)
-	ev.Event = &agentapi.AgentEvent_SessionStarted{
-		SessionStarted: &agentapi.SessionStarted{SessionId: sessionID},
-	}
+	ev.Type = "session_started"
 	b.hub.Publish(ev)
 }
 
 func (b *hookBridge) OnSessionStopped(serial, instanceID, sessionID, reason string) {
 	ev := b.newEvent(serial, instanceID, sessionID)
-	ev.Event = &agentapi.AgentEvent_SessionStopped{
-		SessionStopped: &agentapi.SessionStopped{SessionId: sessionID, Reason: reason},
-	}
+	ev.Type = "session_stopped"
+	ev.Data.Reason = reason
+	b.qosMu.Lock()
+	delete(b.qosAt, sessionID)
+	b.qosMu.Unlock()
 	b.hub.Publish(ev)
 }
 
 func (b *hookBridge) OnStreamDead(serial, instanceID, sessionID string) {
 	ev := b.newEvent(serial, instanceID, sessionID)
-	ev.Event = &agentapi.AgentEvent_StreamDead{
-		StreamDead: &agentapi.StreamDead{SessionId: sessionID},
-	}
+	ev.Type = "stream_dead"
 	b.hub.Publish(ev)
 }
 
@@ -142,16 +142,10 @@ func (b *hookBridge) OnQoS(q agent.QoSReport) {
 	b.qosMu.Unlock()
 
 	ev := b.newEvent(q.Serial, q.InstanceID, q.SessionID)
-	ev.Event = &agentapi.AgentEvent_Qos{
-		Qos: &agentapi.QoSReport{
-			SessionId:   q.SessionID,
-			LossRate:    q.LossRate,
-			RttMs:       q.RTTMs,
-			Bitrate:     int32(q.Bitrate),
-			Fps:         q.FPS,
-			ResolutionX: int32(q.ResX),
-			ResolutionY: int32(q.ResY),
-		},
+	ev.Type = "qos"
+	ev.Data.QoS = &QoSData{
+		LossRate: q.LossRate, RTTMs: q.RTTMs, Bitrate: q.Bitrate,
+		FPS: q.FPS, ResolutionX: q.ResX, ResolutionY: q.ResY,
 	}
 	b.hub.Publish(ev)
 }
@@ -161,25 +155,22 @@ func (b *hookBridge) OnError(serial, instanceID, code, msg string) {
 		b.onError(code, msg)
 	}
 	ev := b.newEvent(serial, instanceID, "")
-	ev.Event = &agentapi.AgentEvent_AgentError{
-		AgentError: &agentapi.AgentError{Code: code, Message: msg},
-	}
+	ev.Type = "agent_error"
+	ev.Data.Code, ev.Data.Message = code, msg
 	b.hub.Publish(ev)
 }
 
 func (b *hookBridge) OnDeviceReleased(serial, instanceID, reason string) {
 	ev := b.newEvent(serial, instanceID, "")
-	ev.Event = &agentapi.AgentEvent_DeviceReleased{
-		DeviceReleased: &agentapi.DeviceReleased{Reason: reason},
-	}
+	ev.Type = "device_released"
+	ev.Data.Reason = reason
 	b.hub.Publish(ev)
 }
 
 func (b *hookBridge) OnDeviceReset(serial, instanceID, reason string) {
 	ev := b.newEvent(serial, instanceID, "")
-	ev.Event = &agentapi.AgentEvent_DeviceReset{
-		DeviceReset: &agentapi.DeviceReset{Reason: reason},
-	}
+	ev.Type = "device_reset"
+	ev.Data.Reason = reason
 	b.hub.Publish(ev)
 }
 
@@ -193,6 +184,7 @@ type Host struct {
 	hub    *EventHub
 	bridge *hookBridge
 	dm     *agent.DeviceManager
+	grants *sessionauth.Store
 
 	// bootstrapped 表示进程以 --bootstrap 启动（相当于预 Init，但 Init 仍可
 	// 调用并全量覆盖，见 PLATFORM-API.md §8.3 决策#6）。
@@ -213,6 +205,7 @@ func New(store *agent.ConfigStore, port int, version string) *Host {
 	h := &Host{
 		store:     store,
 		hub:       NewEventHub(64),
+		grants:    sessionauth.NewStore(),
 		port:      port,
 		version:   version,
 		startedAt: time.Now(),
@@ -242,6 +235,8 @@ func (h *Host) MarkBootstrapped() {
 
 // OnStop registers a callback invoked after Stop completes (--one-shot).
 func (h *Host) OnStop(fn func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.onStop = fn
 }
 
@@ -249,7 +244,11 @@ func (h *Host) OnStop(fn func()) {
 func (h *Host) EventHub() *EventHub { return h.hub }
 
 // DeviceManager exposes the device manager (nil before Init).
-func (h *Host) DeviceManager() *agent.DeviceManager { return h.dm }
+func (h *Host) DeviceManager() *agent.DeviceManager {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.dm
+}
 
 // State returns the current lifecycle state.
 func (h *Host) State() int32 {
@@ -258,25 +257,26 @@ func (h *Host) State() int32 {
 
 // Init 注入全局配置（仅 UNINITIALIZED 合法；重复 → ERR_ALREADY_INIT）。
 // bootstrap 启动后允许 Init 覆盖（全量替换，见 PLATFORM-API.md §8.3）。
-func (h *Host) Init(req *agentapi.InitRequest) *agentapi.InitResponse {
+func (h *Host) Init(cfg *config.AgentConfig) *InitResponse {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if atomic.LoadInt32(&h.state) != stateUninitialized && !h.bootstrapped {
-		return &agentapi.InitResponse{
-			Ok: false, ErrorCode: "ERR_ALREADY_INIT",
-			Message: "already initialized; call Stop first",
-		}
+		return &InitResponse{Response: *errResp("ERR_ALREADY_INIT", "already initialized; call Stop first")}
 	}
-	if req.GetGlobalConfig() == nil {
-		return &agentapi.InitResponse{
-			Ok: false, ErrorCode: "ERR_INVALID_ARG",
-			Message: "missing global_config",
+	if err := validateConfig(cfg); err != nil {
+		return &InitResponse{Response: *errResp("ERR_INVALID_ARG", err.Error())}
+	}
+	if h.bootstrapped && h.dm != nil {
+		if len(h.dm.List()) != 0 {
+			return &InitResponse{Response: *errResp("ERR_CONFLICT", "stop prepared devices before replacing bootstrap configuration")}
 		}
+		h.dm.StopAll()
+		h.dm = nil
 	}
 
-	cfg := config.ToAgentConfig(req.GlobalConfig)
 	h.store.SetGlobal(cfg)
+	cfg = h.store.Global()
 	// 端口池按全局 scrcpy 配置创建（共享给所有设备）。
 	if h.dm == nil {
 		pool := agent.NewSharedPortPool(cfg.Scrcpy.PortPoolStart, cfg.Scrcpy.PortPoolSize)
@@ -288,14 +288,11 @@ func (h *Host) Init(req *agentapi.InitRequest) *agentapi.InitResponse {
 	logger.Info("host initialized",
 		"signaling", cfg.SignalingURL, "service", cfg.ServiceID,
 		"actual_port", h.port)
-	return &agentapi.InitResponse{
-		Ok: true, ErrorCode: "OK",
-		ActualPort: int32(h.port),
-	}
+	return &InitResponse{Response: *okResp(), ActualPort: h.port}
 }
 
 // Start 进入运行态（INITIALIZED → RUNNING）。幂等。
-func (h *Host) Start() *agentapi.CommonResponse {
+func (h *Host) Start() *Response {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -311,16 +308,17 @@ func (h *Host) Start() *agentapi.CommonResponse {
 }
 
 // Stop 优雅停止：回收所有设备、断开会话与信令、状态回 UNINITIALIZED。幂等。
-func (h *Host) Stop() *agentapi.CommonResponse {
+func (h *Host) Stop() *Response {
 	h.mu.Lock()
-	dm := h.dm
-	h.mu.Unlock()
-
-	if dm != nil {
-		dm.StopAll()
+	if h.State() == stateUninitialized {
+		h.mu.Unlock()
+		return okResp()
+	}
+	h.grants.RevokeAll()
+	if h.dm != nil {
+		h.dm.StopAll()
 	}
 
-	h.mu.Lock()
 	atomic.StoreInt32(&h.state, stateUninitialized)
 	h.dm = nil
 	h.bootstrapped = false
@@ -335,32 +333,39 @@ func (h *Host) Stop() *agentapi.CommonResponse {
 }
 
 // ReloadConfig 全量替换全局配置（不中断现有会话；新准备设备生效）。
-func (h *Host) ReloadConfig(cfg *agentapi.GlobalConfig) *agentapi.CommonResponse {
+func (h *Host) ReloadConfig(cfg *config.AgentConfig) *Response {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if atomic.LoadInt32(&h.state) == stateUninitialized {
 		return errResp("ERR_NOT_INIT", "not initialized")
 	}
-	if cfg == nil {
-		return errResp("ERR_INVALID_ARG", "missing global_config")
+	if err := validateConfig(cfg); err != nil {
+		return errResp("ERR_INVALID_ARG", err.Error())
 	}
-	h.store.SetGlobal(config.ToAgentConfig(cfg))
+	next := agent.NewConfigStore(cfg).Global()
+	previous := h.store.Global()
+	if next.Scrcpy.PortPoolStart != previous.Scrcpy.PortPoolStart || next.Scrcpy.PortPoolSize != previous.Scrcpy.PortPoolSize {
+		return errResp("ERR_CONFLICT", "port pool changes require Stop and Init")
+	}
+	h.store.SetGlobal(cfg)
 	logger.Info("config reloaded")
 	return okResp()
 }
 
 // Health 探活。未初始化时 ok=false 且 last_error=ERR_NOT_INIT（L02）。
-func (h *Host) Health() *agentapi.HealthResponse {
+func (h *Host) Health() *HealthResponse {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	uptime := int64(time.Since(h.startedAt).Seconds())
 	lastErr, _ := h.lastError.Load().(string)
 
 	if atomic.LoadInt32(&h.state) == stateUninitialized {
-		return &agentapi.HealthResponse{
+		return &HealthResponse{
 			Ok: false, Version: h.version, LastError: "ERR_NOT_INIT",
 		}
 	}
 
-	h.mu.Lock()
 	dm := h.dm
-	h.mu.Unlock()
 	var devices []agent.DeviceView
 	if dm != nil {
 		devices = dm.List()
@@ -371,20 +376,20 @@ func (h *Host) Health() *agentapi.HealthResponse {
 			active++
 		}
 	}
-	return &agentapi.HealthResponse{
+	return &HealthResponse{
 		Ok:             true,
 		Version:        h.version,
-		DeviceCount:    int32(len(devices)),
-		ActiveSessions: int32(active),
+		DeviceCount:    len(devices),
+		ActiveSessions: active,
 		UptimeSeconds:  uptime,
 		LastError:      lastErr,
 	}
 }
 
-func okResp() *agentapi.CommonResponse {
-	return &agentapi.CommonResponse{Ok: true, ErrorCode: "OK"}
+func okResp() *Response {
+	return &Response{Ok: true, ErrorCode: "OK"}
 }
 
-func errResp(code, msg string) *agentapi.CommonResponse {
-	return &agentapi.CommonResponse{Ok: false, ErrorCode: code, Message: msg}
+func errResp(code, msg string) *Response {
+	return &Response{Ok: false, ErrorCode: code, Message: msg}
 }
