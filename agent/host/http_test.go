@@ -84,6 +84,28 @@ func TestHTTPBodyLimits(t *testing.T) {
 	}
 }
 
+func TestHTTPSSELimit(t *testing.T) {
+	s, _ := NewHTTPServer(New(agent.NewConfigStore(nil), 0, "test"), "token")
+	for i := 0; i < cap(s.streams); i++ {
+		s.streams <- struct{}{}
+	}
+	r := httptest.NewRequest("GET", "/v1/events", nil)
+	r.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, r)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status %d", w.Code)
+	}
+	<-s.streams
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, r.WithContext(ctx))
+	if w.Code != http.StatusOK || len(s.streams) != cap(s.streams)-1 {
+		t.Fatal("stream slot not released")
+	}
+}
+
 func TestHTTPSSEDisconnect(t *testing.T) {
 	h := New(agent.NewConfigStore(nil), 0, "test")
 	handler, _ := NewHTTPServer(h, "token")

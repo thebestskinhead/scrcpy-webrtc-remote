@@ -21,13 +21,14 @@ type HTTPServer struct {
 	h         *Host
 	tokenHash [32]byte
 	mux       *http.ServeMux
+	streams   chan struct{}
 }
 
 func NewHTTPServer(h *Host, token string) (*HTTPServer, error) {
 	if h == nil || strings.TrimSpace(token) == "" {
 		return nil, errors.New("host and management token are required")
 	}
-	s := &HTTPServer{h: h, tokenHash: sha256.Sum256([]byte(token)), mux: http.NewServeMux()}
+	s := &HTTPServer{h: h, tokenHash: sha256.Sum256([]byte(token)), mux: http.NewServeMux(), streams: make(chan struct{}, 64)}
 	s.mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, h.Health()) })
 	s.mux.HandleFunc("POST /v1/init", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -205,6 +206,13 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 }
 
 func (s *HTTPServer) events(w http.ResponseWriter, r *http.Request) {
+	select {
+	case s.streams <- struct{}{}:
+		defer func() { <-s.streams }()
+	default:
+		writeJSON(w, http.StatusTooManyRequests, errResp("ERR_LIMIT", "too many event subscribers"))
+		return
+	}
 	if _, ok := w.(http.Flusher); !ok {
 		writeJSON(w, http.StatusInternalServerError, errResp("ERR_INTERNAL", "streaming unavailable"))
 		return
