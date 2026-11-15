@@ -288,6 +288,7 @@ function Invoke-Start {
 
     Ensure-Go
     if (-not $env:ASTRA_MANAGEMENT_TOKEN) { throw '请先设置 ASTRA_MANAGEMENT_TOKEN（仅服务端持有）' }
+    if (-not $env:ASTRA_AGENT_TOKEN -or $env:ASTRA_AGENT_TOKEN -eq $env:ASTRA_MANAGEMENT_TOKEN) { throw '请设置独立的 ASTRA_AGENT_TOKEN（仅服务端持有）' }
     $adbPath = Resolve-Adb
     $adbDir = Split-Path -Parent $adbPath
 
@@ -394,7 +395,7 @@ function Invoke-Status {
     } catch { Warn "health 请求失败: $($_.Exception.Message)" }
 
     try {
-        $a = Invoke-RestMethod -Uri "$baseUrl/api/agents" -TimeoutSec 5
+        $a = Invoke-RestMethod -Uri "$baseUrl/api/agents" -Headers @{ Authorization = "Bearer $env:ASTRA_MANAGEMENT_TOKEN" } -TimeoutSec 5
         if ($a) {
             foreach ($ag in $a) { Ok ("agent: svc=$($ag.service_id) inst=$($ag.instance_id) serial=$($ag.device_serial) online=$($ag.online)") }
         } else { Warn 'no agents registered' }
@@ -428,7 +429,7 @@ function Invoke-Monitor {
 
         try {
             $h = Invoke-RestMethod -Uri "$baseUrl/api/health" -TimeoutSec 4
-            $a = Invoke-RestMethod -Uri "$baseUrl/api/agents" -TimeoutSec 4
+            $a = Invoke-RestMethod -Uri "$baseUrl/api/agents" -Headers @{ Authorization = "Bearer $env:ASTRA_MANAGEMENT_TOKEN" } -TimeoutSec 4
             $aStr = if ($a) { ($a | ForEach-Object { "$($_.instance_id):$($_.online)" }) -join ' ' } else { '(none)' }
             Write-Host ("  health ok | agents: {0}" -f $aStr)
         } catch { Write-Host "  health FAIL: $($_.Exception.Message)" -ForegroundColor Red }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -46,11 +47,13 @@ func ConnectWithParams(url, serviceID, instanceID, deviceSerial string, p Connec
 	}
 
 	dialer := websocket.DefaultDialer
-	var header http.Header
-	if len(p.WSHeaders) > 0 {
-		header = make(http.Header, len(p.WSHeaders))
-		for k, v := range p.WSHeaders {
-			header.Set(k, v)
+	header := make(http.Header, len(p.WSHeaders)+1)
+	for k, v := range p.WSHeaders {
+		header.Set(k, v)
+	}
+	if header.Get("Authorization") == "" {
+		if token := os.Getenv("ASTRA_AGENT_TOKEN"); token != "" {
+			header.Set("Authorization", "Bearer "+token)
 		}
 	}
 	ws, _, err := dialer.Dial(url+path, header)

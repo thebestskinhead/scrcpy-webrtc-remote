@@ -2,12 +2,25 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
 	"scrcpy-webrtc-remote/pkg/sessionauth"
 	"scrcpy-webrtc-remote/pkg/signaling"
 )
+
+func requireBearer(w http.ResponseWriter, r *http.Request, token string) bool {
+	actual := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+	expected := sha256.Sum256([]byte("Bearer " + token))
+	if token == "" || len(r.Header.Values("Authorization")) != 1 || subtle.ConstantTimeCompare(actual[:], expected[:]) != 1 {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "authorization required", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
 
 func authorizedWS(sig *signaling.Server, auth *sessionauth.Client, relay bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
