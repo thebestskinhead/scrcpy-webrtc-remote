@@ -58,7 +58,9 @@ func authorizedWS(sig *signaling.Server, auth *sessionauth.Client, relay bool) h
 			http.Error(w, "authorized device offline", http.StatusConflict)
 			return
 		}
-		conn, err := upgrader.Upgrade(w, r, nil)
+		authorizedUpgrader := upgrader
+		authorizedUpgrader.Subprotocols = []string{"astra.auth." + token}
+		conn, err := authorizedUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}

@@ -93,6 +93,9 @@ func TestAuthorizedWebSocketLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer browser.Close()
+	if browser.Subprotocol() != "astra.auth."+token {
+		t.Fatal("authorized subprotocol was not negotiated")
+	}
 	_ = browser.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if err := agent.ReadJSON(&message); err != nil || message.Type != common.TypeBound || message.SessionID != grant.ID {
 		t.Fatalf("bound scope: %+v %v", message, err)
