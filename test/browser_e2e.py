@@ -89,23 +89,28 @@ def adb(serial, *args):
 
 
 def focus(serial):
-    output = adb(serial, 'shell', 'dumpsys', 'window')
-    return next((line.strip() for line in output.splitlines() if 'mCurrentFocus=' in line), '')
+    output = adb(serial, 'shell', 'dumpsys', 'activity', 'activities')
+    return next((line.strip() for line in output.splitlines() if 'topResumedActivity=' in line), '')
 
 
 def display_settings(serial):
+    adb(serial, 'shell', 'input', 'keyevent', 'KEYCODE_WAKEUP')
     adb(serial, 'shell', 'am', 'start', '-W', '-a', 'android.settings.DISPLAY_SETTINGS')
-    time.sleep(1)
-    current = focus(serial)
-    assert 'settings' in current.lower(), 'display settings did not gain focus'
-    return current
+    deadline = time.monotonic() + 15
+    while True:
+        current = focus(serial)
+        if 'settings' in current.lower():
+            return current
+        if time.monotonic() > deadline:
+            raise AssertionError('display settings did not gain focus: ' + current)
+        time.sleep(.5)
 
 
 def media_stats(page):
     return page.evaluate('''async () => {
         const c = window._app.conn, v = document.getElementById('remoteVideo');
         const stats = [...(await c.pc.getStats()).values()];
-        const video = stats.find(s => s.type === 'inbound-rtp' && s.kind === 'video');
+        const video = stats.filter(s => s.type === 'inbound-rtp' && s.kind === 'video');
         const audio = stats.filter(s => s.type === 'inbound-rtp' && s.kind === 'audio');
         const canvas = document.createElement('canvas'); canvas.width = 32; canvas.height = 32;
         const ctx = canvas.getContext('2d'); ctx.drawImage(v, 0, 0, 32, 32);
@@ -115,7 +120,8 @@ def media_stats(page):
             min = Math.min(min, pixels[i]); max = Math.max(max, pixels[i]);
             hash = ((hash * 31) + pixels[i] + pixels[i+1] + pixels[i+2]) >>> 0;
         }
-        return {frames: video?.framesDecoded || 0, bytes: video?.bytesReceived || 0,
+        return {frames: video.reduce((sum, s) => sum + (s.framesDecoded || 0), 0),
+            bytes: video.reduce((sum, s) => sum + (s.bytesReceived || 0), 0),
             width: v.videoWidth, height: v.videoHeight, pixelRange: max-min, hash,
             presented: v.getVideoPlaybackQuality().totalVideoFrames,
             audioBytes: audio.reduce((sum, s) => sum + (s.bytesReceived || 0), 0)};
@@ -185,8 +191,13 @@ def browser_checks(client, ws, serial):
         wait_device(client, serial, lambda d: d['signaling_connected'])
         display_settings(serial)
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            executable = os.environ.get('ASTRA_E2E_CHROME')
+            browser = p.chromium.launch(headless=True, executable_path=executable)
             try:
+                probe = browser.new_page()
+                assert probe.evaluate("RTCRtpReceiver.getCapabilities('video').codecs.some(c => c.mimeType === 'video/H264')"), 'Browser lacks H.264; set ASTRA_E2E_CHROME to a compatible Chrome executable'
+                probe.close()
+                print('[INFO] browser', browser.version, flush=True)
                 page, auth = connect_page(browser, client, ws, serial)
                 control_check(page, serial, 4)
                 control_check(page, serial, 3)
