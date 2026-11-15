@@ -43,14 +43,29 @@
   const CG = (window.CG = window.CG || {});
 
   // ---------- 事件总线（页面层可在此基础上监听；SDK 也用同一实例） ----------
-  CG.events = CG.events || (function() {
-    const listeners = {};
+  CG.createEvents = function() {
+    const listeners = new Map();
     return {
-      on(evt, fn)  { (listeners[evt] = listeners[evt] || []).push(fn); },
-      off(evt, fn) { const arr = listeners[evt]; if (arr) { const i = arr.indexOf(fn); if (i >= 0) arr.splice(i, 1); } },
-      emit(evt, d) { (listeners[evt] || []).forEach(fn => fn(d)); },
+      on(evt, fn) { if (!listeners.has(evt)) listeners.set(evt, new Set()); listeners.get(evt).add(fn); },
+      off(evt, fn) { listeners.get(evt)?.delete(fn); },
+      emit(evt, data) { [...(listeners.get(evt) || [])].forEach(fn => fn(data)); },
+      clear() { listeners.clear(); },
     };
-  })();
+  };
+  CG.events = CG.events || CG.createEvents();
+
+  function signalingURL(base, kind, service, instance, authorization) {
+    const grant = authorization && authorization.session;
+    if (!grant || !authorization.token || grant.service_id !== service || grant.instance_id !== instance || Date.parse(grant.expires_at) <= Date.now() || !Number.isFinite(Date.parse(grant.expires_at))) throw new Error('有效的会话授权是必需的');
+    base = base || location.host;
+    const url = new URL(base.includes('://') ? base : `${location.protocol}//${base}`);
+    if (!['http:', 'https:', 'ws:', 'wss:'].includes(url.protocol)) throw new Error('无效的信令地址');
+    url.protocol = ['https:', 'wss:'].includes(url.protocol) ? 'wss:' : 'ws:';
+    url.pathname = `/ws/${kind}/${encodeURIComponent(service)}/${encodeURIComponent(instance)}`;
+    url.search = new URLSearchParams({ session_id: grant.session_id }).toString();
+    url.hash = '';
+    return url.toString();
+  }
 
   // ---------- 日志 / toast 默认值（页面层通常会覆盖 toast 指向 UI） ----------
   CG.log   = CG.log   || ((msg) => console.log('[CG] ' + msg));
@@ -80,6 +95,10 @@
   class ConnectionManager {
     constructor(opts) {
       opts = opts || {};
+      this.events = opts.events || CG.createEvents();
+      this.authorization = opts.authorization || null;
+      this._generation = 0;
+      this._destroyed = false;
       this._videoEl       = opts.videoEl || null;      // 注入视频元素（嵌入自有页面时）
       this._signalingBase = opts.signalingBase || '';  // 形如 'host:port' 或 ''（用当前域）
       this._iceServers    = opts.iceServers || null;   // 自定义 ICE（默认走 agent 下发）
@@ -108,7 +127,7 @@
       if (this._state === s) return;
       this._state = s;
       CG.log('[CM] state: ' + s);
-      CG.events.emit('state-change', s);
+      this.events.emit('state-change', s);
     }
 
     // ---- timers ----
@@ -126,48 +145,52 @@
     // ================================================================
     //  connect — sequential, each step guards the next
     // ================================================================
-    async connect(svcId, instId) {
+    async connect(svcId, instId, authorization) {
+      if (this._destroyed) throw new Error('会话已销毁');
+      if (authorization) this.authorization = authorization;
       // 非空闲态进入（例如重连时旧连接仍残留 connected 态）：先静默拆除
       if (this._state !== S_IDLE && this._state !== S_ERROR) this.disconnect(true);
       if (!svcId || !instId) {
-        CG.events.emit('error', { message: '请输入服务 ID 和设备 ID' });
+        this.events.emit('error', { message: '请输入服务 ID 和设备 ID' });
         return;
       }
       this.disconnect(true);
+      const generation = this._generation;
 
       this._setState(S_WS_CONN);
-      CG.events.emit('connecting', { svcId, instId });
+      this.events.emit('connecting', { svcId, instId });
       this._remoteDescSet = false;
       this._iceBuffer = [];
 
       // 1) WS
       try { await this._connectWS(svcId, instId); }
-      catch (e) { this._fail('WebSocket 连接失败: ' + (e.message || '无法连接服务器')); return; }
+      catch (e) { if (generation === this._generation) this._fail('WebSocket 连接失败: ' + (e.message || '无法连接服务器')); return; }
+      if (generation !== this._generation) return;
 
       // 2) wait for ICE servers
       this._setState(S_WAIT_ICE);
-      CG.events.emit('step', { id: 'ice-cfg', state: 'active' });
+      this.events.emit('step', { id: 'ice-cfg', state: 'active' });
       try { await this._waitForICEServers(); }
       catch (_) { CG.log('[CM] ICE servers timeout, using defaults'); }
+      if (generation !== this._generation) return;
       this._emitIceCfgDetail();
 
       // 3) create PC + offer
       this._setState(S_WS_OPEN);
       try { this._createPC(); await this._createOffer(); }
-      catch (e) { this._fail('WebRTC 初始化失败: ' + (e.message || '无法创建连接')); return; }
+      catch (e) { if (generation === this._generation) this._fail('WebRTC 初始化失败: ' + (e.message || '无法创建连接')); return; }
     }
 
     // ---- WS ----
     _connectWS(svcId, instId) {
       return new Promise((resolve, reject) => {
-        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const base = this._signalingBase || location.host;
-        const url = `${proto}//${base}/ws/browser/${encodeURIComponent(svcId)}/${encodeURIComponent(instId)}`;
-        this.ws = new WebSocket(url);
+        const url = signalingURL(this._signalingBase, 'browser', svcId, instId, this.authorization);
+        this._wsReject = reject;
+        this.ws = new WebSocket(url, ['astra.auth.' + this.authorization.token]);
         this._setTimer('ws_connect', () => { reject(new Error('超时')); }, TIMEOUT_WS);
         this.ws.onopen = () => {
           this._clearTimer('ws_connect');
-          CG.events.emit('step', { id: 'ws', state: 'done' });
+          this.events.emit('step', { id: 'ws', state: 'done' });
           this._setupWSHandlers();
           resolve();
         };
@@ -186,8 +209,8 @@
         this._cleanupPC(); this._cleanupWS();
         this._setState(S_IDLE);
         // 已建立连接后掉线 → 交给上层自动重连；未建立时视为普通断开
-        if (wasConnected) CG.events.emit('lost', { reason: 'ws-close' });
-        else CG.events.emit('idle');
+        if (wasConnected) this.events.emit('lost', { reason: 'ws-close' });
+        else this.events.emit('idle');
       };
       this._onWsError = () => { if (this._state !== S_CONNECTED) this._fail('WebSocket 通讯错误'); };
       this.ws.addEventListener('message', this._onWsMsg);
@@ -214,14 +237,14 @@
         if (this._state === S_CONNECTED) {
           this._cleanupPC(); this._cleanupWS();
           this._setState(S_IDLE);
-          CG.events.emit('lost', { reason: 'stream-dead' });
+          this.events.emit('lost', { reason: 'stream-dead' });
         } else {
           this._fail('云端设备视频流中断');
         }
         break;
       case 'preempted':
         CG.log('[CM] preempted: device taken by another user');
-        CG.events.emit('preempted');
+        this.events.emit('preempted');
         this.disconnect(true);
         break;
       }
@@ -231,20 +254,24 @@
       this._clearTimer('sdp');
       this.pcId = data.pc_id;
       this._setState(S_ANS_RCVD);
-      CG.events.emit('step', { id: 'sdp', state: 'done' });
-      this.pc.setRemoteDescription(new RTCSessionDescription(data.answer)).then(() => {
+      this.events.emit('step', { id: 'sdp', state: 'done' });
+      const pc = this.pc;
+      const generation = this._generation;
+      if (!pc) return;
+      pc.setRemoteDescription(new RTCSessionDescription(data.answer)).then(() => {
+        if (generation !== this._generation || pc !== this.pc) return;
         this._remoteDescSet = true;
         if (this._iceBuffer.length) {
           this._iceBuffer.forEach(c => this.pc.addIceCandidate(new RTCIceCandidate(c)).catch(() => {}));
           this._iceBuffer = [];
         }
         this._setState(S_ICE_CONN);
-        CG.events.emit('step', { id: 'ice', state: 'active' });
+        this.events.emit('step', { id: 'ice', state: 'active' });
         this._setTimer('ice', () => {
-          CG.events.emit('step', { id: 'ice', state: 'error' });
+          this.events.emit('step', { id: 'ice', state: 'error' });
           this._fail('ICE 连接超时 (30s) — 可能原因: NAT 不支持直连 / 未配置 TURN 中转');
         }, TIMEOUT_ICE);
-      }).catch(e => { this._fail('SDP 协商失败: ' + e.message); });
+      }).catch(e => { if (generation === this._generation) this._fail('SDP 协商失败: ' + e.message); });
     }
 
     _handleIceCandidate(data) {
@@ -261,10 +288,14 @@
     // ---- wait for ICE servers ----
     _waitForICEServers() {
       if (this._iceServersReceived) return Promise.resolve();
-      return Promise.race([
-        new Promise(r => { this._iceServersResolve = r; }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000)),
-      ]);
+      return new Promise(resolve => {
+        this._iceServersResolve = () => {
+          this._clearTimer('ice_config');
+          this._iceServersResolve = null;
+          resolve();
+        };
+        this._setTimer('ice_config', this._iceServersResolve, 3000);
+      });
     }
 
     _emitIceCfgDetail() {
@@ -275,7 +306,7 @@
         else if (tag.startsWith('turn:')) label = 'TURN';
         return { label, urls: s.urls || [] };
       });
-      CG.events.emit('step', { id: 'ice-cfg', state: 'done', detail });
+      this.events.emit('step', { id: 'ice-cfg', state: 'done', detail });
     }
 
     // ================================================================
@@ -293,11 +324,11 @@
           try {
             const m = JSON.parse(text);
             if (m.type === 'clipboard' && typeof m.text === 'string') {
-              CG.events.emit('device-clipboard', { text: m.text });
+              this.events.emit('device-clipboard', { text: m.text });
             } else if (m.type === 'debug_log') {
-              CG.events.emit('debug-log', { line: m.data && m.data.line });
+              this.events.emit('debug-log', { line: m.data && m.data.line });
             } else if (m.type === 'debug_log_batch') {
-              CG.events.emit('debug-chunk', {
+              this.events.emit('debug-chunk', {
                 seq: m.data && m.data.seq,
                 total: m.data && m.data.total,
                 chunk: m.data && m.data.chunk,
@@ -337,20 +368,20 @@
         CG.log('[CM] iceConnectionState: ' + s);
         if (s === 'connected' || s === 'completed') {
           this._clearTimer('ice');
-          CG.events.emit('step', { id: 'ice', state: 'done' });
-          CG.events.emit('link-degraded', { degraded: false });
+          this.events.emit('step', { id: 'ice', state: 'done' });
+          this.events.emit('link-degraded', { degraded: false });
         } else if (s === 'disconnected') {
           // 可恢复的抖动：提示弱网，不中断
-          if (this._state === S_CONNECTED) CG.events.emit('link-degraded', { degraded: true });
+          if (this._state === S_CONNECTED) this.events.emit('link-degraded', { degraded: true });
         } else if (s === 'failed') {
           this._clearTimer('ice');
           if (this._state === S_CONNECTED) {
             // 会话中失败 → 自动重连流程
             this._cleanupPC(); this._cleanupWS();
             this._setState(S_IDLE);
-            CG.events.emit('lost', { reason: 'ice-failed' });
+            this.events.emit('lost', { reason: 'ice-failed' });
           } else {
-            CG.events.emit('step', { id: 'ice', state: 'error' });
+            this.events.emit('step', { id: 'ice', state: 'error' });
             this._fail('ICE 连接失败 — 可能原因: NAT 不支持直连 / 未配置 TURN 中转');
           }
         }
@@ -365,7 +396,7 @@
           if (this._state === S_CONNECTED) {
             this._cleanupPC(); this._cleanupWS();
             this._setState(S_IDLE);
-            CG.events.emit('lost', { reason: 'pc-failed' });
+            this.events.emit('lost', { reason: 'pc-failed' });
           } else {
             this._fail('WebRTC 连接失败');
           }
@@ -394,7 +425,9 @@
             try { await video.play(); return true; }
             catch (_) { return false; }
           };
+          const generation = this._generation;
           tryPlay().then(ok => {
+            if (generation !== this._generation) return;
             if (!ok && !video.muted) {
               CG.log('[CM] play() rejected (autoplay policy), retrying muted');
               video.muted = true;
@@ -405,16 +438,19 @@
           // track 到达即启动遥测：若等 'playing'（首帧解码）才启动，弱网下
           // 初始关键帧反复受损 → 永不出帧 → decoder_status / 停滞看门狗 /
           // FEC / 码率阶梯全部永不武装（零帧启动死锁）。
-          CG.events.emit('track-video', e.track);
+          this.events.emit('track-video', e.track);
 
-          video.addEventListener('playing', () => {
-            if (this._state === S_ERROR) return;
-            CG.events.emit('step', { id: 'video', state: 'done' });
-            CG.events.emit('step', { id: 'first', state: 'done' });
+          if (this._playingCleanup) this._playingCleanup();
+          const onPlaying = () => {
+            if (generation !== this._generation || this._state === S_ERROR) return;
+            this.events.emit('step', { id: 'video', state: 'done' });
+            this.events.emit('step', { id: 'first', state: 'done' });
             this._clearTimer('ice');
             this._setState(S_CONNECTED);
             this.sendWS({ type: 'first_frame', data: { ts: Date.now() } });
-          }, { once: true });
+          };
+          video.addEventListener('playing', onPlaying, { once: true });
+          this._playingCleanup = () => video.removeEventListener('playing', onPlaying);
         }
 
         e.track.addEventListener('ended', () => CG.log(`[CM] ${e.track.kind} ended`));
@@ -430,10 +466,14 @@
 
     // ---- Offer ----
     async _createOffer() {
-      const offer = await this.pc.createOffer();
-      await this.pc.setLocalDescription(offer);
+      const pc = this.pc;
+      const generation = this._generation;
+      const offer = await pc.createOffer();
+      if (generation !== this._generation || pc !== this.pc) return;
+      await pc.setLocalDescription(offer);
+      if (generation !== this._generation || pc !== this.pc) return;
       this._setState(S_OFFER_SENT);
-      CG.events.emit('step', { id: 'sdp', state: 'active' });
+      this.events.emit('step', { id: 'sdp', state: 'active' });
       this.sendWS({ type: 'offer', offer: { sdp: offer.sdp, type: offer.type } });
       this._setTimer('sdp', () => this._fail('SDP 协商超时'), TIMEOUT_SDP);
     }
@@ -447,10 +487,12 @@
       this._cleanupPC();
       this._cleanupWS();
       this._setState(S_ERROR);
-      CG.events.emit('error', { message: msg, fatal: true });
+      this.events.emit('error', { message: msg, fatal: true });
     }
 
     disconnect(silent) {
+      this._generation++;
+      if (this._iceServersResolve) this._iceServersResolve();
       this._clearAllTimers();
       this._iceBuffer = [];
       this._remoteDescSet = false;
@@ -462,10 +504,11 @@
       // 重连流程表现为"界面在重连、实际什么也没发"（不发出 idle 事件，
       // 避免打断 reconnecting 界面）。
       if (silent) { this._state = S_IDLE; }
-      else { this._setState(S_IDLE); CG.events.emit('idle'); }
+      else { this._setState(S_IDLE); this.events.emit('idle'); }
     }
 
     _cleanupPC() {
+      if (this._playingCleanup) { this._playingCleanup(); this._playingCleanup = null; }
       if (this.pc) {
         this.pc.removeEventListener('icecandidate', this._onIceCand);
         this.pc.removeEventListener('iceconnectionstatechange', this._onIceState);
@@ -480,8 +523,19 @@
       this.dc = null;
     }
 
+    destroy() {
+      if (this._destroyed) return;
+      this._destroyed = true;
+      this.disconnect(true);
+      this.authorization = null;
+      this._videoEl = null;
+      this.events.clear();
+    }
+
     _cleanupWS() {
+      if (this._wsReject) { this._wsReject(new Error('连接已取消')); this._wsReject = null; }
       if (this.ws) {
+        this.ws.onopen = this.ws.onerror = null;
         this.ws.removeEventListener('message', this._onWsMsg);
         this.ws.removeEventListener('close', this._onWsClose);
         this.ws.removeEventListener('error', this._onWsError);
@@ -553,6 +607,7 @@
     start(connMgr) {
       this.stop();
       this._conn = connMgr;
+      this.events = connMgr.events;
       this._lastVideoBytes = 0;
       this._lastAudioBytes = 0;
       this._lastTime = performance.now();
@@ -564,6 +619,8 @@
 
     stop() {
       if (this._interval) { clearInterval(this._interval); this._interval = null; }
+      this._generation = (this._generation || 0) + 1;
+      this._conn = null;
     }
 
     setHudVisible(v) { this._hudVisible = v; }
@@ -572,8 +629,11 @@
       const conn = this._conn;
       if (!conn || !conn.pc) return;
 
+      const generation = this._generation;
+      const pc = conn.pc;
       let stats;
-      try { stats = await conn.pc.getStats(); } catch (_) { return; }
+      try { stats = await pc.getStats(); } catch (_) { return; }
+      if (generation !== this._generation || conn !== this._conn || pc !== conn.pc) return;
 
       let videoRtp = null, audioRtp = null, candPair = null;
       stats.forEach(r => {
@@ -590,7 +650,7 @@
         const remoteType = remoteCand ? remoteCand.candidateType : '';
         const isRelay    = localType === 'relay' || remoteType === 'relay';
         this._connTypeReported = true;
-        CG.events.emit('connection-type', {
+        this.events.emit('connection-type', {
           type: isRelay ? 'relay' : 'p2p',
           localType, remoteType,
           label: isRelay ? '中转 (TURN)' : '直连 (P2P)',
@@ -636,7 +696,7 @@
         this._updateHud(vLossPct, rttStr, fpsStr, `${vBitrate} kbps`);
 
         // 数值化指标 → UI 弱网判定
-        CG.events.emit('stats', {
+        this.events.emit('stats', {
           loss: parseFloat(vLossPct) || 0,
           rtt: rttMs,
           fps,
@@ -645,7 +705,7 @@
 
         // 分辨率变化 → 坐标映射 + 旋转
         if (videoRtp.frameWidth && videoRtp.frameHeight) {
-          CG.events.emit('resolution', { width: videoRtp.frameWidth, height: videoRtp.frameHeight });
+          this.events.emit('resolution', { width: videoRtp.frameWidth, height: videoRtp.frameHeight });
         }
 
         // 媒体停滞（判「卡死」不判「静止」）
@@ -725,7 +785,7 @@
       if (st.secs >= 15 && !st.fired) {
         st.fired = true;
         CG.log('[STALL] 媒体停滞 15s（码流仍在） → 触发重连');
-        CG.events.emit('media-stalled');
+        this.events.emit('media-stalled');
       }
     }
 
@@ -784,7 +844,7 @@
     bind(connMgr, opts) {
       if (this._bound) return;
       this._conn = connMgr;
-      this._bound = true;
+      this.events = connMgr.events;
 
       this._els.overlay   = (opts && opts.overlayEl)   || document.getElementById('controlOverlay');
       this._els.video     = (opts && opts.videoEl)     || document.getElementById('remoteVideo');
@@ -794,56 +854,62 @@
       const overlay = this._els.overlay;
       if (!overlay) return;
 
-      // ---- Pointer events ----
-      overlay.addEventListener('pointerdown', e => this._onPointerDown(e));
-      overlay.addEventListener('pointermove', e => this._onPointerMove(e));
-      overlay.addEventListener('pointerup',   e => this._onPointerUp(e));
-      overlay.addEventListener('pointercancel', e => this._onPointerCancel(e));
-      overlay.addEventListener('wheel',       e => this._onWheel(e), { passive: false });
-
-      // ---- Keyboard ----
-      window.addEventListener('keydown', e => this._onKeyDown(e));
-      window.addEventListener('keyup',   e => this._onKeyUp(e));
-
-      // ---- IME composition ----
-      window.addEventListener('compositionstart', () => { this._composing = true; });
-      window.addEventListener('compositionend',   e => this._onCompositionEnd(e));
-
-      // ---- Clipboard: browser → device ----
-      window.addEventListener('paste', e => this._onPaste(e));
-
-      // ---- Resize / orientation ----
-      window.addEventListener('resize', () => this._updateOverlay());
-      window.matchMedia('(orientation: portrait)').addEventListener('change', () => {
-        setTimeout(() => this._updateOverlay(), 200);
-        setTimeout(() => this._updateOverlay(), 500);
-      });
-
-      // ---- Video dimension tracking ----
+      this._bound = true;
+      this._listeners = [];
+      this._observers = [];
+      this._timeouts = new Set();
+      const listen = (target, type, fn, options) => {
+        target.addEventListener(type, fn, options);
+        this._listeners.push(() => target.removeEventListener(type, fn, options));
+      };
+      const later = ms => {
+        const timer = setTimeout(() => { this._timeouts.delete(timer); if (this._bound) this._updateOverlay(); }, ms);
+        this._timeouts.add(timer);
+      };
+      const keyboard = (opts && opts.keyboardTarget) || overlay;
+      if (overlay.tabIndex < 0) overlay.tabIndex = 0;
+      listen(overlay, 'pointerdown', e => { overlay.focus?.({ preventScroll: true }); this._onPointerDown(e); });
+      listen(overlay, 'pointermove', e => this._onPointerMove(e));
+      listen(overlay, 'pointerup', e => this._onPointerUp(e));
+      listen(overlay, 'pointercancel', e => this._onPointerCancel(e));
+      listen(overlay, 'wheel', e => this._onWheel(e), { passive: false });
+      listen(keyboard, 'keydown', e => this._onKeyDown(e));
+      listen(keyboard, 'keyup', e => this._onKeyUp(e));
+      listen(keyboard, 'compositionstart', () => { this._composing = true; });
+      listen(keyboard, 'compositionend', e => this._onCompositionEnd(e));
+      listen(keyboard, 'paste', e => this._onPaste(e));
+      listen(window, 'resize', () => this._updateOverlay());
+      listen(window.matchMedia('(orientation: portrait)'), 'change', () => { later(200); later(500); });
       const video = this._els.video;
       if (video) {
-        video.addEventListener('loadedmetadata', () => {
-          if (video.videoWidth > 0 && video.videoHeight > 0) {
-            this._resolution.width  = video.videoWidth;
-            this._resolution.height = video.videoHeight;
-          }
+        const resize = () => {
+          if (video.videoWidth > 0 && video.videoHeight > 0) this._resolution = { width: video.videoWidth, height: video.videoHeight };
           this._updateOverlay();
-        });
-        video.addEventListener('resize', () => {
-          if (video.videoWidth > 0 && video.videoHeight > 0) {
-            this._resolution.width  = video.videoWidth;
-            this._resolution.height = video.videoHeight;
-          }
-          this._updateOverlay();
-        });
-
-        new ResizeObserver(() => this._updateOverlay()).observe(video);
-        const container = this._els.container;
-        if (container) new ResizeObserver(() => this._updateOverlay()).observe(container);
+        };
+        listen(video, 'loadedmetadata', resize);
+        listen(video, 'resize', resize);
+        for (const element of [video, this._els.container]) {
+          if (!element) continue;
+          const observer = new ResizeObserver(() => this._updateOverlay());
+          observer.observe(element);
+          this._observers.push(observer);
+        }
       }
+      later(500);
+    }
 
-      // Initial overlay layout
-      setTimeout(() => this._updateOverlay(), 500);
+    destroy() {
+      this._bound = false;
+      for (const remove of this._listeners || []) remove();
+      for (const observer of this._observers || []) observer.disconnect();
+      for (const timer of this._timeouts || []) clearTimeout(timer);
+      this._listeners = [];
+      this._observers = [];
+      this._timeouts = new Set();
+      this._pointerId = null;
+      this._conn = null;
+      this._els = {};
+      this._composing = false;
     }
 
     /** 是否处于本地 UI 输入态（连接表单 / 键盘面板等），此时不拦截键盘与剪贴板 */
@@ -1023,7 +1089,7 @@
       if (!text) return;
       e.preventDefault();
       this._conn.setClipboard(text, true);
-      CG.events.emit('clipboard-sent', { length: text.length });
+      this.events.emit('clipboard-sent', { length: text.length });
     }
 
     _keyFromEvent(e) {
@@ -1053,11 +1119,11 @@
   // ====================================================================
   CG.relayQuery = function(svcId, instId, payload, opts) {
     return new Promise((resolve, reject) => {
-      const host = (opts && opts.host) || CG._signalingBase || location.host;
-      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${proto}//${host}/ws/relay/${encodeURIComponent(svcId)}/${encodeURIComponent(instId)}`;
-      const ws = new WebSocket(url);
-      const relayId = (crypto.randomUUID ? crypto.randomUUID() : 'xxxx-xxxx-xxxx'.replace(/x/g, () => ((Math.random() * 16) | 0).toString(16)));
+      if (!payload || payload.type !== 'query_status') throw new Error('relay 仅支持授权状态查询');
+      const authorization = opts && opts.authorization;
+      const url = signalingURL(opts && opts.host, 'relay', svcId, instId, authorization);
+      const ws = new WebSocket(url, ['astra.auth.' + authorization.token]);
+      const relayId = authorization.session.session_id;
       const timer = setTimeout(() => { try { ws.close(); } catch (e) {} reject(new Error('超时')); }, 5000);
       let resolved = false;
 
@@ -1100,27 +1166,33 @@
       this._input = new CG.InputController();
       this._statsEnabled = opts.stats !== false;
       this._inputOpts = opts.input || null;
-    }
-
-    on(evt, fn)  { CG.events.on(evt, fn); return this; }
-    off(evt, fn) { CG.events.off(evt, fn); return this; }
-    once(evt, fn) {
-      const w = (d) => { fn(d); this.off(evt, w); };
-      return this.on(evt, w);
-    }
-
-    connect(svc, inst) {
-      const p = this._cm.connect(svc, inst);
-      // 视频轨道到达后：启动统计 + 绑定输入
-      const onTrack = () => {
+      this.events = this._cm.events;
+      this._onTrack = () => {
         if (this._statsEnabled) this._stats.start(this._cm);
         this._input.bind(this._cm, this._inputOpts);
       };
-      CG.events.on('track-video', onTrack);
-      return p;
+      this.events.on('track-video', this._onTrack);
     }
 
-    disconnect(silent) { this._cm.disconnect(silent); this._stats.stop(); }
+    on(evt, fn)  { this.events.on(evt, fn); return this; }
+    off(evt, fn) { this.events.off(evt, fn); return this; }
+    once(evt, fn) {
+      const w = (d) => { this.off(evt, w); fn(d); };
+      return this.on(evt, w);
+    }
+
+    connect(svc, inst, authorization) {
+      this._stats.stop();
+      this._input.destroy();
+      return this._cm.connect(svc, inst, authorization);
+    }
+
+    disconnect(silent) { this._stats.stop(); this._input.destroy(); this._cm.disconnect(silent); }
+    destroy() {
+      this.disconnect(true);
+      this.events.off('track-video', this._onTrack);
+      this._cm.destroy();
+    }
 
     // ---- 控制透传 ----
     sendText(t)            { this._cm.sendText(t); }

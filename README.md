@@ -21,13 +21,13 @@
 一条完整的链路只有两个 Go 进程：
 
 - **signaling**（`cmd/signaling`）—— 信令服务器：维护 agent 注册表、转发浏览器 ⇄ agent 的 SDP/ICE 消息、下发 ICE 服务器、提供 REST 接口并托管前端页面。
-- **agentd**（`cmd/agentd`）—— agent sidecar：以独立进程（sidecar）形态运行，本机监听 gRPC（`127.0.0.1:17890`）；平台（或测试用 `test/agentdrv`）经 gRPC 注入配置后，通过 ADB 拉起 scrcpy server，把设备的 H.264/Opus 流经 WebRTC 推给浏览器，并把浏览器的触控/按键/剪贴板指令注入回设备。
+- **agentd**（`cmd/agentd`）—— agent sidecar：以独立进程（sidecar）形态运行，本机监听 HTTP（`127.0.0.1:17890`）；平台（或测试用 `test/agentdrv`）经 HTTP 注入配置后，通过 ADB 拉起 scrcpy server，把设备的 H.264/Opus 流经 WebRTC 推给浏览器，并把浏览器的触控/按键/剪贴板指令注入回设备。
 
-> 配置注入：sidecar 不读本地 YAML。平台经 gRPC `Init`/`PrepareDevice` 动态注入全局与设备配置；
+> 配置注入：sidecar 不读本地 YAML。平台经 HTTP `Init`/`PrepareDevice` 动态注入全局与设备配置；
 > `test/agentdrv`（目标2，模拟平台 driver）可读 `config/agent.yaml` 并按原逻辑把配置传给 sidecar，
 > 用于浏览器端人工验证 sidecar 真实可用（见 `test/README.md`）。
 
-浏览器端是**纯静态前端**（`signaling/static/app`），无需构建、无需 SDK，打开即用。
+浏览器端是**纯静态前端**（`signaling/static/app`），无需构建，但连接前必须由平台后端签发短期会话授权。平台实现 `window.AstraAuthorizeSession({service_id, instance_id, preempt})`，返回 `POST /v1/sessions` 的响应；本地测试可预置 `window.AstraSessionAuthorization`。URL 中的 `s/d` 仅定位设备，不是凭据。接口契约见 [`api/openapi.yaml`](api/openapi.yaml)，集成说明见 [`docs/HTTP-API.md`](docs/HTTP-API.md)，验收边界见 [`test/README.md`](test/README.md)。
 
 ---
 
@@ -55,7 +55,7 @@
 - **预热池**：浏览器断开后 scrcpy server 保活 `warm_keep_seconds`（默认 300s），窗口内重连免冷启动；启动期暂停缓冲 + 从首个 IDR 起播，无黑屏
 - scrcpy server 进程死亡检测（`stream_dead`），前端自动重连并冷启动新会话
 - agent ⇄ signaling 断线自动重连（前 12 次 5s，之后 5min）+ 30s 心跳保活
-- 会话抢占：新浏览器可接管设备，旧浏览器收到 `preempted` 并断开
+- 会话默认拒绝占用冲突；平台后端签发授权时显式设置 `preempt: true` 才能接管，浏览器和 relay 不能隐式抢占
 - 端口池（默认 30000-30099）防止多实例 ADB forward 冲突
 
 ### 设备控制（DataChannel）
@@ -68,7 +68,7 @@
 ### 信令服务器
 
 - `/ws/agent/{service}` agent 注册；`/ws/browser/{service}/{instance}` 浏览器信令（bound/unbound 生命周期 + 会话 ID 路由）
-- `/ws/relay/{service}/{instance}` 通用 relay 通道：平台后端可在不占用会话的情况下查询设备状态（`query_status`）或发起抢占（`preempt`）
+- `/ws/relay/{service}/{instance}` 授权 relay 通道，仅允许 `query_status`；与浏览器共用短期授权，撤销或过期会关闭两路连接
 - ICE 服务器下发：STUN + TURN（静态凭据），浏览器与 agent 均从信令获取
 - REST：`GET /api/agents`（在线设备列表）、`GET /api/health`、`GET /health`
 - 静态托管前端（`/app/`），`GET /` 自动跳转
@@ -78,7 +78,7 @@
 - 入口页：服务 ID / 设备 ID（URL `?s=&d=` 自动预填）、上次会话一键重连
 - 连接进度引导（连接设备 → 建立通道 → 加载画面），失败页含技术详情
 - 会话中掉线自动重连（指数退避 ×5），弱网徽标 + 延迟/丢包/帧率/码率 HUD
-- 设备被占用提示，可一键「接管使用」
+- 占用冲突由平台授权接口返回；接管必须由后端显式授权
 - 设置：方向锁定、声音开关、画质切换、全屏、网络悬浮窗、开发者实时流指标、修复视频流
 
 ---
@@ -97,7 +97,7 @@
 
 ### 方式一：dev.ps1（Windows，推荐）
 
-所有组件用 `go run` 直接运行源码，不预编译：
+所有组件用 `go run` 直接运行源码，不预编译。启动前设置随机的 `ASTRA_MANAGEMENT_TOKEN` 和不同的 `ASTRA_AGENT_TOKEN`；各后端进程使用一致的对应值，不得下发浏览器。该开发脚本会操作 ADB，不用于无设备回归：
 
 ```powershell
 # 一键：启动 signaling + agentd，并用 agentdrv 驱动 sidecar（go run）→ 状态检查
@@ -110,7 +110,7 @@
 .\dev.ps1 -Action monitor  # 循环监控日志与告警
 ```
 
-常用参数：`-AdbPath`（adb 路径，默认自动探测）、`-AdbHost`（默认 `127.0.0.1:16384` MuMu）、`-ServiceId / -InstanceId`、`-WebPort`、`-GrpcPort`（默认 17890）、`-AudioEnabled`（模拟器无 Opus 编码器时**不要**开）。
+常用参数：`-AdbPath`（adb 路径，默认自动探测）、`-AdbHost`（默认 `127.0.0.1:16384` MuMu）、`-ServiceId / -InstanceId`、`-WebPort`、`-HttpPort`（默认 17890）、`-AudioEnabled`（模拟器无 Opus 编码器时**不要**开）。
 
 启动成功后浏览器打开：
 
@@ -122,13 +122,13 @@ http://127.0.0.1:8080/app/?s=demo-service&d=device-1
 
 ```bash
 # 终端 1：信令服务器
-go run ./cmd/signaling -c config/signaling.yaml
+go run ./cmd/signaling -c config/signaling.yaml --management-url http://127.0.0.1:17890
 
-# 终端 2：agent sidecar（本地 gRPC 监听 127.0.0.1:17890）
-go run ./cmd/agentd --grpc-port 17890
+# 终端 2：agent sidecar（本地 HTTP 监听 127.0.0.1:17890）
+go run ./cmd/agentd --http-port 17890
 
-# 终端 3：模拟平台 driver（读 config/agent.yaml → Init/Start/PrepareDevice 驱动 sidecar）
-go run ./test/agentdrv -c config/agent.yaml --grpc 127.0.0.1:17890 --events
+# 终端 3：平台 driver；各终端预先设置上述后端令牌
+go run ./test/agentdrv -c config/agent.yaml --http http://127.0.0.1:17890 --events
 ```
 
 ---
@@ -175,7 +175,7 @@ WebSocket 消息为 JSON 信封 `{type, ...}`：
 | `reset_video` | browser → agent | 请求关键帧 |
 | `stream_dead` | agent → browser | scrcpy 进程死亡，触发重连 |
 | `preempted` | agent → browser | 设备被接管 |
-| `relay`（含 `relay_id` + `payload`） | browser ⇄ agent（经 relay 通道） | 通用请求/响应，如 `query_status` → `status_resp`、`preempt` → `preempt_resp` |
+| `relay`（含 `relay_id` + `payload`） | browser ⇄ agent（经 relay 通道） | 仅 `query_status` → `status_resp`，relay_id 绑定授权会话 |
 | `ping` / `pong` | agent ⇄ signaling | 心跳 |
 
 DataChannel（`control`）内为 JSON 控制指令：`inject_touch` / `inject_scroll` / `inject_keycode` / `inject_text` / `set_clipboard` / `get_clipboard` / `back_or_screen_on` / `rotate_device` / `expand_notification` / `expand_settings` / `collapse_panels` / `set_display_power` / `reset_video` / `set_quality` 等。
@@ -192,9 +192,9 @@ DataChannel（`control`）内为 JSON 控制指令：`inject_touch` / `inject_sc
 │   └── agent.yaml          # agent 配置（供 test/agentdrv 注入 sidecar）
 ├── cmd/
 │   ├── signaling/          # 信令服务器入口
-│   └── agentd/             # agent sidecar 入口（本机 gRPC 127.0.0.1:17890）
+│   └── agentd/             # agent sidecar 入口（本机 HTTP 127.0.0.1:17890）
 ├── agent/                  # agent 实现
-│   ├── host/               # sidecar 生命周期编排 + gRPC server（13 RPC + 事件流）
+│   ├── host/               # sidecar 生命周期编排 + HTTP JSON API + SSE 事件流
 │   ├── configstore.go      # 平台注入配置的内存存储（全局 + 每设备覆盖）
 │   ├── devicemanager.go    # 设备管理（Prepare/Release/Reset/List，持锁原子）
 │   ├── hooks.go            # PlatformHooks 事件回调接口
@@ -204,16 +204,15 @@ DataChannel（`control`）内为 JSON 控制指令：`inject_touch` / `inject_sc
 │       ├── portpool/       # ADB forward 端口池
 │       └── webrtc/         # pion PeerConnection（NACK / RED FEC / PLI）
 ├── api/
-│   ├── agent.proto         # gRPC 契约（唯一事实源）
-│   └── gen/                # protoc 生成的 Go 代码
+│   └── openapi.yaml        # HTTP 管理接口契约
 ├── test/
-│   ├── testcases.md        # 用例契约（权威）
-│   ├── runner.py           # 目标1：自动化用例加载器（Python gRPC 客户端）
-│   ├── agentdrv/           # 目标2：模拟平台 driver（读 agent.yaml → gRPC 驱动 sidecar）
-│   └── py/                 # protoc 生成的 Python 代码
+│   ├── README.md           # 测试方法与实机验收边界
+│   ├── runner.py           # Python HTTP/SSE 集成测试
+│   ├── agentdrv/           # 平台 YAML → HTTP driver
+│   └── sdk.test.cjs        # SDK 实例隔离与销毁回归
 ├── pkg/
 │   ├── common/             # 共享 WebSocket 消息类型
-│   ├── config/             # YAML 配置加载 / DeviceConfig 合并 / proto 互转
+│   ├── config/             # YAML 配置加载 / DeviceConfig 合并
 │   ├── logger/             # slog 日志
 │   ├── signaling/          # 信令引擎（纯 WS 逻辑，不依赖 HTTP）
 │   └── types/              # 媒体 / 控制共享类型
@@ -230,7 +229,9 @@ DataChannel（`control`）内为 JSON 控制指令：`inject_touch` / `inject_sc
 
 - **音频**：依赖设备端 Opus MediaCodec 编码器。部分模拟器镜像（如 MuMu）没有该编码器，开启 `audio_enabled: true` 会导致 scrcpy server 崩溃——此类环境请保持音频关闭（默认）。
 - **TURN**：支持静态凭据（`mode: static` / `none`）；尚未内置 Cloudflare Calls、coturn ephemeral 等动态凭据模式。复杂 NAT 组网需要自备 TURN 服务器。
-- **鉴权**：信令与前端目前无用户鉴权（`service_id` 即连接凭证），适合内网/演示环境；对外部署需在网关层自行加认证与 TLS。
+- **鉴权与部署**：HTTP 管理和设备列表使用管理 Bearer；Agent 注册使用独立 `ASTRA_AGENT_TOKEN`，持有它的 Agent 属于可信后端域，可注册设备身份，尚无逐设备 Agent 权限分配。浏览器与 relay 使用短期会话授权，默认同源。用户登录、设备访问策略由平台后端负责；对外部署必须经过同源 TLS 网关，跨主机后端链路使用 TLS。不要公开暴露明文管理端口。
+- **撤销语义**：独立信令通过每秒校验、单次三秒超时检测撤销，关闭 WebSocket 可能延迟约四秒，并非同步全局撤销。多信令节点调度不在本轮范围内。
+- **验收范围**：本轮只验证宿主 ADB 模式的无设备逻辑；真实音视频、TURN、Android 设备内运行仍需单独验收。
 - 前端目前只提供 `/app/` 云游戏页面（无独立 SDK 包）。
 
 ---

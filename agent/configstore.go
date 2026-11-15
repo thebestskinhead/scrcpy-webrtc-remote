@@ -24,8 +24,7 @@ type ConfigStore struct {
 func NewConfigStore(initial *config.AgentConfig) *ConfigStore {
 	s := &ConfigStore{device: make(map[string]*config.DeviceConfig)}
 	if initial != nil {
-		cp := applyDefaults(*initial)
-		s.global.Store(&cp)
+		s.SetGlobal(initial)
 	}
 	return s
 }
@@ -33,13 +32,36 @@ func NewConfigStore(initial *config.AgentConfig) *ConfigStore {
 // SetGlobal atomically replaces the global config (ReloadConfig 全量替换）。
 // 入参归一（零值字段补默认）后存指针；调用方不应再修改传入对象。
 func (s *ConfigStore) SetGlobal(cfg *config.AgentConfig) {
-	cp := applyDefaults(*cfg)
+	cp := applyDefaults(*cloneGlobal(cfg))
 	s.global.Store(&cp)
 }
 
-// Global returns the current global config (read-only; do not mutate).
+// Global returns an independent configuration snapshot.
 func (s *ConfigStore) Global() *config.AgentConfig {
-	return s.global.Load()
+	return cloneGlobal(s.global.Load())
+}
+
+func cloneGlobal(cfg *config.AgentConfig) *config.AgentConfig {
+	if cfg == nil {
+		return nil
+	}
+	cp := *cfg
+	cp.InstanceList = append([]config.InstanceConfig(nil), cfg.InstanceList...)
+	cp.STUNServers = append([]string(nil), cfg.STUNServers...)
+	if cfg.TURNServer != nil {
+		turn := *cfg.TURNServer
+		turn.URLs = append([]string(nil), turn.URLs...)
+		cp.TURNServer = &turn
+	}
+	return &cp
+}
+
+func cloneValue[T any](v *T) *T {
+	if v == nil {
+		return nil
+	}
+	cp := *v
+	return &cp
 }
 
 // SetDeviceOverrides stores per-device overrides for serial.
@@ -51,6 +73,15 @@ func (s *ConfigStore) SetDeviceOverrides(serial string, d *config.DeviceConfig) 
 		return
 	}
 	cp := *d
+	cp.MaxSize = cloneValue(d.MaxSize)
+	cp.VideoBitRate = cloneValue(d.VideoBitRate)
+	cp.MinVideoBitRate = cloneValue(d.MinVideoBitRate)
+	cp.ClearBitrate = cloneValue(d.ClearBitrate)
+	cp.HDBitrate = cloneValue(d.HDBitrate)
+	cp.VideoKeyframeInterval = cloneValue(d.VideoKeyframeInterval)
+	cp.VideoMaxFPS = cloneValue(d.VideoMaxFPS)
+	cp.AudioEnabled = cloneValue(d.AudioEnabled)
+	cp.WarmKeepSeconds = cloneValue(d.WarmKeepSeconds)
 	s.device[serial] = &cp
 }
 
@@ -65,7 +96,7 @@ func (s *ConfigStore) ClearDeviceOverrides(serial string) {
 // overrides applied. Each call allocates a fresh snapshot — callers may keep
 // or discard it freely.
 func (s *ConfigStore) ForDevice(serial string) *config.AgentConfig {
-	g := s.global.Load()
+	g := s.Global()
 	if g == nil {
 		return nil
 	}

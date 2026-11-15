@@ -83,7 +83,7 @@ type Session struct {
 	pool   *portpool.Pool
 	cfg    config.ScrcpyConfig
 
-	state atomic.Value
+	state   atomic.Value
 	adbPort int
 	server  *exec.Cmd
 
@@ -94,6 +94,9 @@ type Session struct {
 	stopCh            chan struct{}
 	wg                sync.WaitGroup
 	forwardersStarted atomic.Bool
+	lifecycleMu       sync.Mutex
+	releaseOnce       sync.Once
+	diedOnce          sync.Once
 
 	// output channels for zero-copy forwarding
 	VideoCh chan Sample
@@ -236,6 +239,11 @@ func (s *Session) ForwardPaused() bool {
 // StartForwarders 启动 forwardVideo、forwardAudio 和 controlReader。
 // 调用方允许重复调用（通过 forwardersStarted 保护）。
 func (s *Session) StartForwarders() {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.State() == StateReleased {
+		return
+	}
 	if s.forwardersStarted.Swap(true) {
 		return
 	}
@@ -251,7 +259,7 @@ func (s *Session) StartForwarders() {
 	go func() { defer s.wg.Done(); s.controlReader() }()
 	go func() {
 		s.wg.Wait()
-		close(s.diedCh)
+		s.diedOnce.Do(func() { close(s.diedCh) })
 	}()
 }
 
@@ -886,11 +894,15 @@ func (s *Session) GetAudioCodec() string {
 }
 
 func (s *Session) Release() {
-	if s.State() == StateReleased {
-		return
-	}
+	s.releaseOnce.Do(s.release)
+}
+
+func (s *Session) release() {
+	s.lifecycleMu.Lock()
 	s.setState(StateReleased)
 	close(s.stopCh)
+	started := s.forwardersStarted.Load()
+	s.lifecycleMu.Unlock()
 
 	// Close connections to unblock readers
 	if s.videoConn != nil {
@@ -904,13 +916,33 @@ func (s *Session) Release() {
 	}
 
 	s.wg.Wait()
+	if !started {
+		close(s.VideoCh)
+		close(s.AudioCh)
+		close(s.CtrlCh)
+	} else if !s.cfg.AudioEnabled {
+		close(s.AudioCh)
+	}
+	s.diedOnce.Do(func() { close(s.diedCh) })
 
 	// Drain channels to unblock writers. Use drainWg so callers can wait
 	// for drain completion before creating a new session.
 	s.drainWg.Add(3)
-	go func() { defer s.drainWg.Done(); for range s.VideoCh {} }()
-	go func() { defer s.drainWg.Done(); for range s.AudioCh {} }()
-	go func() { defer s.drainWg.Done(); for range s.CtrlCh  {} }()
+	go func() {
+		defer s.drainWg.Done()
+		for range s.VideoCh {
+		}
+	}()
+	go func() {
+		defer s.drainWg.Done()
+		for range s.AudioCh {
+		}
+	}()
+	go func() {
+		defer s.drainWg.Done()
+		for range s.CtrlCh {
+		}
+	}()
 	s.drainWg.Wait()
 
 	s.cleanupServer()

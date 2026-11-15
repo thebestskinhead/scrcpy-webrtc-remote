@@ -19,17 +19,26 @@ import (
 	"scrcpy-webrtc-remote/pkg/common"
 	"scrcpy-webrtc-remote/pkg/config"
 	"scrcpy-webrtc-remote/pkg/logger"
+	"scrcpy-webrtc-remote/pkg/sessionauth"
 	"scrcpy-webrtc-remote/pkg/signaling"
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin:    func(r *http.Request) bool { return true },
 	ReadBufferSize: 1024, WriteBufferSize: 1024,
 }
 
 func main() {
 	configPath := flag.String("c", "./config/signaling.yaml", "config file path")
+	managementURL := flag.String("management-url", "http://127.0.0.1:17890", "Astra HTTP management URL")
 	flag.Parse()
+	agentToken := os.Getenv("ASTRA_AGENT_TOKEN")
+	if agentToken == "" || agentToken == os.Getenv("ASTRA_MANAGEMENT_TOKEN") {
+		log.Fatal("ASTRA_AGENT_TOKEN is required and must differ from ASTRA_MANAGEMENT_TOKEN")
+	}
+	auth, err := sessionauth.NewClient(*managementURL, os.Getenv("ASTRA_MANAGEMENT_TOKEN"))
+	if err != nil {
+		log.Fatalf("session authorization: %v", err)
+	}
 
 	cfg, err := config.LoadSignaling(*configPath)
 	if err != nil {
@@ -50,6 +59,9 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/agent/", func(w http.ResponseWriter, r *http.Request) {
+		if !requireBearer(w, r, agentToken) {
+			return
+		}
 		svc := pathLast(r.URL.Path)
 		if svc == "" {
 			http.Error(w, "missing service_id", http.StatusBadRequest)
@@ -64,32 +76,8 @@ func main() {
 
 	// Browser WebSocket — the app frontend (signaling/static/app) connects
 	// here for WebRTC signaling (bound / offer / answer / ICE / QoS).
-	mux.HandleFunc("/ws/browser/", func(w http.ResponseWriter, r *http.Request) {
-		svc, inst := pathLast2(r.URL.Path)
-		if svc == "" || inst == "" {
-			http.Error(w, "missing service_id or instance_id", http.StatusBadRequest)
-			return
-		}
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		sig.HandleBrowserWS(conn, svc, inst)
-	})
-
-	// Relay endpoint — platform web servers (any language) connect here
-	mux.HandleFunc("/ws/relay/", func(w http.ResponseWriter, r *http.Request) {
-		svc, inst := pathLast2(r.URL.Path)
-		if svc == "" || inst == "" {
-			http.Error(w, "missing service_id or instance_id", http.StatusBadRequest)
-			return
-		}
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		sig.HandleRelayWS(conn, svc, inst)
-	})
+	mux.HandleFunc("/ws/browser/", authorizedWS(sig, auth, false))
+	mux.HandleFunc("/ws/relay/", authorizedWS(sig, auth, true))
 
 	// Health check for internal monitoring
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -99,6 +87,9 @@ func main() {
 
 	// API — agent list / health
 	mux.HandleFunc("GET /api/agents", func(w http.ResponseWriter, r *http.Request) {
+		if !requireBearer(w, r, os.Getenv("ASTRA_MANAGEMENT_TOKEN")) {
+			return
+		}
 		type resp struct {
 			ServiceID    string `json:"service_id"`
 			InstanceID   string `json:"instance_id"`

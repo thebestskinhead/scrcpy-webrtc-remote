@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -22,10 +23,10 @@ type Client struct {
 // ConnectParams 覆盖设备信令连接参数（来自 PrepareDevice.connect_params）。
 // 未设置字段回退全局配置（service_id）或默认路径。
 type ConnectParams struct {
-	ServiceID      string            // 非空则覆盖全局 ServiceID
-	WSHeaders      map[string]string // 附加 WS 握手头
-	RegisterFields map[string]string // 注册消息附加字段（并入 register.Data）
-	WSPath         string            // 覆盖默认 /ws/agent/<service>
+	ServiceID      string            `json:"service_id,omitempty"`      // 非空则覆盖全局 ServiceID
+	WSHeaders      map[string]string `json:"ws_headers,omitempty"`      // 附加 WS 握手头
+	RegisterFields map[string]string `json:"register_fields,omitempty"` // 注册消息附加字段（并入 register.Data）
+	WSPath         string            `json:"ws_path,omitempty"`         // 覆盖默认 /ws/agent/<service>
 }
 
 // Connect dials the signaling server with default params (legacy entry).
@@ -46,11 +47,13 @@ func ConnectWithParams(url, serviceID, instanceID, deviceSerial string, p Connec
 	}
 
 	dialer := websocket.DefaultDialer
-	var header http.Header
-	if len(p.WSHeaders) > 0 {
-		header = make(http.Header, len(p.WSHeaders))
-		for k, v := range p.WSHeaders {
-			header.Set(k, v)
+	header := make(http.Header, len(p.WSHeaders)+1)
+	for k, v := range p.WSHeaders {
+		header.Set(k, v)
+	}
+	if header.Get("Authorization") == "" {
+		if token := os.Getenv("ASTRA_AGENT_TOKEN"); token != "" {
+			header.Set("Authorization", "Bearer "+token)
 		}
 	}
 	ws, _, err := dialer.Dial(url+path, header)
