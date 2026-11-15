@@ -10,7 +10,7 @@
 
 ## HTTP 集成
 
-在三个终端设置相同的、随机生成的 `ASTRA_MANAGEMENT_TOKEN`。该值仅供后端进程使用，不得放入浏览器、URL 或源码。
+在三个终端设置相同的、随机生成的 `ASTRA_MANAGEMENT_TOKEN`。另为 agentd 和 signaling 设置相同的 `ASTRA_AGENT_TOKEN`，它必须与管理令牌不同。两种令牌仅供受信后端进程使用，不得放入浏览器、URL 或源码。浏览器默认只允许同源连接；跨主机部署请通过同源 TLS 网关代理信令。
 
 1. 启动管理服务：`go run ./cmd/agentd --http-port 17890`。
 2. 启动信令：`go run ./cmd/signaling -c config/signaling.yaml --management-url http://127.0.0.1:17890`。
@@ -32,4 +32,4 @@
 
 本地测试不能代替真实音视频、浏览器解码、触控或音频可听性验收。实机入口仅在明确设置 `ASTRA_TEST_DEVICE` 时运行，不应因 ADB 在线而自动开启。
 
-当前旧协议文件清理若尚未完成，仓库中的 protobuf 文件和生成脚本不再是 HTTP 运行入口，也不得用于新集成。
+旧 gRPC 适配、protobuf 契约与生成流程已删除；管理接口只使用 HTTP/OpenAPI。

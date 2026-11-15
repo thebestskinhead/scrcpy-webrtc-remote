@@ -204,6 +204,30 @@ paths:
                           instance_id: {type: string}
                           expires_at: {type: string, format: date-time}
         default: {$ref: '#/components/responses/Error'}
+  /v1/sessions/validate:
+    post:
+      operationId: validateSession
+      description: Backend-only authorization introspection. Requires management Bearer; rejects revoked, expired or mismatched targets. Does not acquire a connection lease.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [session_id, token, service_id, instance_id]
+              properties:
+                session_id: {type: string}
+                token: {type: string}
+                service_id: {type: string}
+                instance_id: {type: string}
+      responses:
+        '200':
+          description: Active authorization (not wrapped in Response)
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Grant'}
+        default: {$ref: '#/components/responses/Error'}
   /v1/sessions/{id}:
     parameters:
       - name: id
@@ -219,7 +243,7 @@ paths:
   /v1/events:
     get:
       operationId: streamEvents
-      description: Authenticated SSE using fetch streaming. No query-string credentials, replay, or Last-Event-ID support. Heartbeats every 15 seconds; slow clients may lose events and must query device state. Each data frame contains one Event JSON object.
+      description: Up to 64 concurrent streams; excess subscribers receive 429 ERR_LIMIT. Authenticated SSE using fetch streaming. No query-string credentials, replay, or Last-Event-ID support. Heartbeats every 15 seconds; slow clients may lose events and must query device state. Each data frame contains one Event JSON object.
       responses:
         '200':
           description: Event stream
@@ -270,6 +294,23 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/Response'}
   schemas:
+    Grant:
+      type: object
+      required: [session_id, device_serial, service_id, instance_id, expires_at]
+      properties:
+        session_id: {type: string}
+        device_serial: {type: string}
+        service_id: {type: string}
+        instance_id: {type: string}
+        expires_at: {type: string, format: date-time}
+    Event:
+      type: object
+      properties:
+        type: {type: string}
+        timestamp_ms: {type: integer, format: int64}
+        session_id: {type: string}
+        device_serial: {type: string}
+        data: {type: object, additionalProperties: true}
     Response:
       type: object
       required: [ok, error_code]

@@ -11,8 +11,8 @@
 
     运行时（部署目录内）:
       signaling.exe -c signaling.yaml     # 前端在 ./static (yaml 已生成好)
-      agentd.exe --http-port 17890        # sidecar，配置由平台经 gRPC 注入
-      # 验证: agentdrv.exe -c agent.yaml --grpc 127.0.0.1:17890 --agentd agentd.exe
+      agentd.exe --http-port 17890        # sidecar，配置由平台经 HTTP（需 ASTRA_MANAGEMENT_TOKEN 和独立 ASTRA_AGENT_TOKEN） 注入
+      # 验证: agentdrv.exe -c agent.yaml --http http://127.0.0.1:17890 --agentd agentd.exe
 
 .PARAMETER Clean
     编译前清理 Go 缓存
@@ -194,6 +194,6 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  Cloud -> copy build/signaling/ to your cloud server, run:"
 Write-Host "           signaling.exe -c signaling.yaml   (listen 0.0.0.0:8080, frontend at /app/)"
 Write-Host "  PC    -> copy build/agent/ to your PC (with ADB), run:"
-Write-Host "           agentd.exe --http-port 17890      (sidecar; 配置由平台经 gRPC 注入)"
-Write-Host "           验证: agentdrv.exe -c agent.yaml --grpc 127.0.0.1:17890 --agentd agentd.exe"
+Write-Host "           agentd.exe --http-port 17890      (sidecar; 配置由平台经 HTTP（需 ASTRA_MANAGEMENT_TOKEN 和独立 ASTRA_AGENT_TOKEN） 注入)"
+Write-Host "           验证: agentdrv.exe -c agent.yaml --http http://127.0.0.1:17890 --agentd agentd.exe"
 Write-Host "========================================" -ForegroundColor Cyan

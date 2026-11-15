@@ -3,7 +3,7 @@
 > 云游戏 WebRTC 远程控制 SDK（引擎层，无界面）
 > 版本：`CG.SDK_VERSION = '1.0.0'` ｜ 文件：`signaling/static/app/js/cg-sdk.js`
 
-`cg-sdk.js` 是 scrcpy-webrtc-remote 的开源前端公共包，只包含「引擎」能力：WebSocket + WebRTC 信令与数据通道生命周期、`getStats` 轮询与弱网/卡死检测、触控/键盘/剪贴板输入与视口坐标映射、信令中继查询、以及一键接入的一体化门面。**它不包含任何界面**，所有内部状态通过 `CG.events` 事件总线暴露，由页面层自行决定如何渲染。
+`cg-sdk.js` 是 scrcpy-webrtc-remote 的开源前端公共包，只包含「引擎」能力：WebSocket + WebRTC 信令与数据通道生命周期、`getStats` 轮询与弱网/卡死检测、触控/键盘/剪贴板输入与视口坐标映射、信令中继查询、以及一键接入的一体化门面。**它不包含任何界面**，连接状态通过实例的 `conn.events` 事件总线暴露，由页面层自行决定如何渲染。
 
 ---
 
@@ -32,7 +32,7 @@
 ## 1. 设计原则
 
 1. **纯引擎，不依赖任何具体 DOM 结构。** 需要挂视频/触摸层时通过构造参数注入（`videoEl` / `overlayEl`）；不传则回退到页面既有 id（`remoteVideo` / `controlOverlay` / `videoContainer` / `root`），保证「现有整页」零改动可用。
-2. **所有状态通过 `CG.events` 暴露。** 页面层监听事件自行渲染，因此本包不含任何界面、HUD、开发者面板写入逻辑。
+2. **连接状态通过实例 `conn.events` 暴露，多个实例互不广播。** 页面层监听事件自行渲染，因此本包不含任何界面、HUD、开发者面板写入逻辑。
 3. **只包含开源能力。** `perfmon` / `debugcollect` 等闭源调试能力由 dev 仓库在 SDK 之上注入，本包不感知（`debug_*` 相关方法在开源构建中为 no-op 或无人消费）。
 
 ---
@@ -43,14 +43,14 @@
 <script src="js/cg-sdk.js"></script>
 ```
 
-SDK 以全局命名空间 `window.CG` 暴露。加载后即可使用：
+SDK 以 `window.CG` 暴露。连接前必须从平台后端取得 `POST /v1/sessions` 的响应（含 `session` 与 `token`），下文以 `authorization` 表示。平台先认证用户并检查设备访问权限；浏览器不得持有管理或 Agent 令牌。现有页面支持平台实现的 `window.AstraAuthorizeSession`，或预置 `window.AstraSessionAuthorization`。示例使用后者，未提供授权会拒绝连接。默认同源连接，异域部署请使用同源 TLS 代理。
 
 ```html
 <video id="remoteVideo" autoplay muted playsinline></video>
 
 <script>
   const conn = new CG.ConnectionManager();
-  conn.connect('demo-service', 'device-1');
+  conn.connect('demo-service', 'device-1', window.AstraSessionAuthorization);
 </script>
 ```
 
@@ -81,7 +81,7 @@ session.on('stats', s => {
 });
 session.on('preempted', () => alert('设备被其他用户接管'));
 
-session.connect('demo-service', 'device-1');
+session.connect('demo-service', 'device-1', window.AstraSessionAuthorization);
 ```
 
 > `RemoteSession` 自动完成：连接管理 + 统计监控 + 输入绑定（触摸/键盘/剪贴板都接好了），并统一了重连策略。多数嵌入场景用这一个类就够了。
@@ -92,13 +92,13 @@ session.connect('demo-service', 'device-1');
 
 ### 4.1 CG.events 事件总线
 
-SDK 内部与页面层共用同一个事件总线实例。
+每个连接拥有独立事件总线。使用 `conn.events`，或门面的 `session.on/off/once` 订阅；`CG.events` 仅保留兼容对象，不再接收连接内部广播。
 
 | 方法 | 说明 |
 |------|------|
-| `CG.events.on(evt, fn)` | 订阅事件 |
-| `CG.events.off(evt, fn)` | 取消订阅 |
-| `CG.events.emit(evt, data)` | 触发事件 |
+| `conn.events.on(evt, fn)` | 订阅实例事件 |
+| `conn.events.off(evt, fn)` | 取消订阅 |
+| `conn.events.emit(evt, data)` | 触发实例事件 |
 
 完整事件清单见 [第 5 节](#5-事件参考)。
 
@@ -128,7 +128,8 @@ CG.toast = (msg, type) => myUI.toast(msg, type);  // 默认 console
 
 | 方法 | 说明 |
 |------|------|
-| `async connect(svcId, instId)` | 建立会话。内部按序执行：WS 连接 → 等待 ICE 配置 → 创建 PeerConnection 并发起 offer |
+| `async connect(svcId, instId, authorization)` | 授权会话连接；授权也可经构造参数 `authorization` 提供，包含 `session` 和 `token` |
+| `destroy()` | 幂等销毁连接、定时器、视频监听和事件；销毁后不可再连接 |
 | `disconnect(silent)` | 断开并清理。`silent=true` 时静默复位状态机，不发 `idle` 事件（重连路径用） |
 | `get state()` | 当前状态机状态（见第 6 节） |
 | `get isConnected()` | 是否处于 `connected` |
@@ -196,30 +197,9 @@ input.bind(connMgr, {
 
 ### 4.6 CG.relayQuery
 
-信令中继查询：在不占用会话的前提下，临时开一条 relay 通道查询设备状态或发起抢占。
+授权中继仅支持 `query_status`。调用 `CG.relayQuery(svc, inst, { type: 'query_status' }, { authorization })`，其中 `authorization` 为平台后端签发的会话响应。`opts.host` 可指定同源代理后的信令地址，默认超时 5 秒。
 
-```js
-// 查询设备是否被占用
-const resp = await CG.relayQuery(svc, inst, { type: 'query_status' });
-// resp.payload.busy === true 表示设备忙
-
-// 发起抢占（接管设备）
-await CG.relayQuery(svc, inst, { type: 'preempt' });
-```
-
-签名：`CG.relayQuery(svcId, instId, payload, opts) => Promise`，`opts.host` 可指定信令地址；5 秒超时。
-
-典型使用流程（参考 `app.js` `_connect()`）：
-
-```js
-const resp = await CG.relayQuery(svc, inst, { type: 'query_status' });
-if (resp.payload && resp.payload.busy) {
-  const ok = await userConfirm('设备正被占用，接管？');
-  if (!ok) return;
-  await CG.relayQuery(svc, inst, { type: 'preempt' });
-}
-conn.connect(svc, inst);
-```
+Relay 不占浏览器连接名额，但必须持有目标设备的有效授权。禁止 relay `preempt`；接管由平台后端认证用户后调用 `POST /v1/sessions` 并显式设置 `preempt: true`。SDK 不提供用户登录或管理令牌存储。
 
 ### 4.7 CG.RemoteSession（一体化门面）
 
@@ -238,7 +218,8 @@ conn.connect(svc, inst);
 | 方法 | 说明 |
 |------|------|
 | `on(evt, fn)` / `off(evt, fn)` / `once(evt, fn)` | 事件订阅（链式） |
-| `async connect(svc, inst)` | 连接（收到首个视频轨后自动启动统计 + 绑定输入） |
+| `async connect(svc, inst, authorization)` | 授权连接（收到首个视频轨后自动启动统计 + 绑定输入） |
+| `destroy()` | 幂等释放连接、统计和输入监听；不自动撤销后端授权 |
 | `disconnect(silent)` | 断开 |
 | `sendText(t)` / `sendKeyEvent(a, kc)` / `sendTouch(...)` / `sendScroll(...)` | 控制透传 |
 | `setClipboard(t, paste)` / `getClipboard()` | 剪贴板透传 |
@@ -254,7 +235,7 @@ conn.connect(svc, inst);
 
 ## 5. 事件参考
 
-所有事件经 `CG.events` 发出，`RemoteSession` 的 `on/off/once` 即转发此总线。
+连接事件经实例 `conn.events` 发出，`RemoteSession` 的 `on/off/once` 仅转发自身连接的事件。输入实例用 `destroy()` 解绑 DOM 监听、定时器和观察器；键盘默认作用于聚焦的 overlay，可用 `keyboardTarget` 指定目标。
 
 ### 连接流程
 
@@ -343,7 +324,7 @@ conn.connect(svc, inst);
 
 ## 8. 信令协议
 
-浏览器信令地址：`/ws/browser/{service_id}/{instance_id}`（ws/wss 随页面协议自动切换）。
+浏览器信令地址：`/ws/browser/{service_id}/{instance_id}?session_id={session.session_id}`（ws/wss 随页面协议自动切换）。浏览器和 relay 握手均使用 `astra.auth.<token>` WebSocket 子协议传递短期凭据，禁止把 token 放到 URL；默认校验同源 Origin。授权过期或撤销会关闭连接，独立信令的轮询撤销可能延迟约四秒。
 
 ### 浏览器 → signaling
 
@@ -369,10 +350,7 @@ conn.connect(svc, inst);
 
 ### relay 通道
 
-地址：`/ws/relay/{service_id}/{instance_id}`。消息为 `{type: 'relay', relay_id, payload}`，`relay_id` 回显匹配响应。典型 payload：
-
-- `query_status` → 响应含 `busy` 字段（占用检测）
-- `preempt` → 抢占设备
+地址：`/ws/relay/{service_id}/{instance_id}?session_id={session.session_id}`。消息为 `{type: 'relay', relay_id, payload}`，`relay_id` 必须等于授权会话 ID。仅支持 `query_status`，响应含 `busy`；禁止经 relay 抢占。
 
 ---
 
@@ -435,7 +413,8 @@ SDK 本身只发事件，重连策略由页面层决定。推荐做法（参考 
 
     // 从 URL 读取 s / d 参数，或用固定值
     const p = new URLSearchParams(location.search);
-    session.connect(p.get('s') || 'demo-service', p.get('d') || 'device-1');
+    session.connect(p.get('s') || 'demo-service', p.get('d') || 'device-1', window.AstraSessionAuthorization);
+    window.addEventListener('pagehide', () => session.destroy(), { once: true });
   </script>
 </body>
 </html>
