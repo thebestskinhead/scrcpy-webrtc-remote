@@ -367,7 +367,8 @@ func (s *Server) handleBrowserWS(ws *websocket.Conn, serviceID, instanceID, sess
 				return
 			}
 			switch msg.Type {
-			case common.TypeOffer, common.TypeIceCandidate:
+			case common.TypeOffer, common.TypeIceCandidate, common.TypeFirstFrame,
+				common.TypeDecoderStats, common.TypeDecoderStatus, common.TypeResetVideo:
 			default:
 				continue
 			}

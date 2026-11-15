@@ -115,6 +115,17 @@ func TestAuthorizedWebSocketLifecycle(t *testing.T) {
 	if err := agent.ReadJSON(&message); err != nil || message.Type != common.TypeOffer || message.SessionID != grant.ID {
 		t.Fatalf("offer scope: %+v %v", message, err)
 	}
+	if err := browser.WriteJSON(common.WsMsg{Type: common.TypeBound, SessionID: "forged"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{common.TypeFirstFrame, common.TypeDecoderStats, common.TypeDecoderStatus, common.TypeResetVideo} {
+		if err := browser.WriteJSON(common.WsMsg{Type: kind, SessionID: "forged"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := agent.ReadJSON(&message); err != nil || message.Type != kind || message.SessionID != grant.ID {
+			t.Fatalf("telemetry scope: %+v %v", message, err)
+		}
+	}
 	store.Revoke(grant.ID)
 	if err := browser.ReadJSON(&message); err == nil {
 		t.Fatal("revoked browser stayed connected")
