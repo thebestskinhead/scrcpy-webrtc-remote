@@ -33,3 +33,14 @@
 本地测试不能代替真实音视频、浏览器解码、触控或音频可听性验收。实机入口仅在明确设置 `ASTRA_TEST_DEVICE` 时运行，不应因 ADB 在线而自动开启。
 
 旧 gRPC 适配、protobuf 契约与生成流程已删除；管理接口只使用 HTTP/OpenAPI。
+
+## 本轮本地验收记录
+
+2026-11-15，Linux，`dev/astra`：
+
+- 全仓 `go test ./... -timeout=90s`、`go test -race ./... -timeout=90s`、`go vet ./...`、`go build ./...` 通过。测试显式清除 `ASTRA_TEST_DEVICE`。
+- Node SDK 5 项回归通过；`cg-sdk.js`、`app.js` 语法检查通过；Python runner 语法及用例枚举通过。
+- 随机凭据、临时端口、独立 loopback 进程下，runner 的 `authentication`、`lifecycle`、`device_management`、`sse`、`authorized_sessions` 五项通过；进程已回收。
+- 完整 Python 集成首次因缺少 `websockets` 模块而未启动；`browser_lifecycle` 未执行。Go 的本地 WebSocket 授权/撤销回归通过，但不替代该 Python 跨进程用例。
+- 未执行 `connectivity`、ADB、真实媒体、TURN 或 Android 内运行测试。PowerShell 脚本未在 Windows 执行。
+- 未推送、未压缩历史、未创建 PR；这些动作等待另行确认。
